@@ -5,6 +5,8 @@
 
   "currency": "EUR",
   "minDiscount": 0.5,
+  "minReference": 25,
+  "shippingEstimate": 5,
   "mode": "balanced",
   "ownDropFactor": 0.4,
   "warmupMin": 4,

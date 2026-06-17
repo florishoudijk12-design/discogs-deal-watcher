@@ -84,6 +84,28 @@ The whole point is to grab a bargain before someone else does, so the watcher is
   coverage over time. At `SLICE_SIZE=200`, 715 releases are fully covered every ~4 runs (~1 h) and
   hot ones every run.
 
+### Finding the real diamonds (not 250 cheap commons)
+
+A flat "≥50% off" rule on a 715-release wantlist surfaced ~250 hits — mostly cheap records where a
+"deal" isn't worth the trouble. The fix is **detect permissively, filter powerfully**, never a hard
+exclusion that could kill the once-in-a-lifetime steal:
+
+- **Value floor (`minReference`, default €25).** Skip records whose VG+ suggested price is under €25.
+  This is *safe for diamonds* — a €100 record always clears it — it only removes low-value noise.
+- **Shipping counts (`shippingEstimate`, default €5).** The API can't see a listing's real shipping
+  (Cloudflare wall), so a configurable estimate is added to the item price and the threshold uses the
+  **total** — shipping hits cheap "deals" hardest and weeds them out, while barely denting a true
+  diamond (€2 + €15 ship vs a €100 record is still 83% off).
+- **Implied condition, shown not excluded.** From the full per-condition suggestion ladder
+  (`engine.impliedGrade`) we read what grade the cheapest copy is *priced* like — `≈ priced as VG+`
+  (green) down to `≈ ≤ Good · very cheap` (amber). The crucial bit: a suspiciously-low price is **also
+  exactly what a mispriced steal looks like**, so we never auto-hide it — we flag it and let you judge
+  (with an optional "hide possibly worn" filter for when you don't want the gamble).
+- **Dashboard sliders + sort do the rest, live.** Min value, min % off (shipping-aware), max total
+  (budget), assumed shipping, "just listed", "hide possibly worn" — all re-filter the loaded deals
+  instantly (no re-scan), and **Sort → Best first** ranks by a diamond-score (effective discount +
+  absolute € saved + own-dip + rarity + freshness, minus a worn/suspicious penalty).
+
 ## Modules
 
 | File | Role | Test |
@@ -160,9 +182,11 @@ from the raw CDN (no token). Only open ⚙ **Settings** to change source:
   *only* for a private repo (fine-grained PAT, *Contents: read-only*). Public repo → leave blank.
 - **Live server** (watcher.js on Fly / localhost): enter the **Server URL** + **Dashboard token**.
 
-It polls every 30s, filters (search / min-discount / **just-listed only** / hide "maybe <VG+"), tags
-`🆕 just listed` copies, and shows a desktop notification on a new deal. The HTTP to GitHub/your
-server happens in the Electron **main** process, so tokens never touch the page.
+It polls every 30s and gives you **live sliders + sort** to hunt the real diamonds without re-scanning
+(min value / min % off / max total / assumed shipping; just-listed, hide-possibly-worn; Sort → Best
+first), tags `🆕 just listed` copies and the implied condition, and shows a desktop notification on a
+new deal (see "Finding the real diamonds"). The HTTP to GitHub/your server happens in the Electron
+**main** process, so tokens never touch the page.
 
 ### ⚡ Scan now (local full sweep, on demand)
 
@@ -235,13 +259,17 @@ Dashboard → source **Live server**, URL `https://<app>.fly.dev`, the `DASHBOAR
 | `DASHBOARD_TOKEN` | bearer token the dashboard must send (live-server model) |
 | `PORT` | dashboard API port (default 8787) |
 | `MIN_DISCOUNT` | deal threshold, 0–1 (default 0.5) |
+| `MIN_REFERENCE` | value floor: VG+ suggestion must be ≥ this € to alert (default 25; safe for diamonds) |
+| `SHIPPING_ESTIMATE` | € added to the item price; the alert threshold uses the total (default 5) |
 | `CURRENCY` | price currency (default EUR) |
 
 ## Known limitations (honest list)
 
 - **No per-copy condition / shipping / exact listing link** — those live behind Cloudflare. The
-  watcher detects *that* a cheap copy exists and links you to verify; it can't pre-filter condition
-  or add shipping to the comparison. The "⚠ maybe below VG+" flag is the partial mitigation.
+  watcher detects *that* a cheap copy exists and links you to verify; it can't read the real grade or
+  real shipping. Mitigations: a configurable **shipping estimate** folded into the total, and the
+  **implied-grade** read (`≈ priced as VG+` … `≈ ≤ Good`) so you can judge condition at a glance — but
+  always confirm the actual grade + shipping on the listing page before buying.
 - **Reference is a *suggested* price, not the historical sales median** — the real median is
   web-only. The VG+ suggestion is the closest API proxy; the trailing-median fallback is our own.
 - If you later decide the condition/shipping precision matters more than 24/7-cloud, the path is a

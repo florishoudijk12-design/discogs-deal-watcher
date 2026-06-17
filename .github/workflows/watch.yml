@@ -52,6 +52,8 @@ jobs:
           SLICE_SIZE: '200'   # priority sweep: top-200 by watch-score/run -> full coverage every ~4 runs (~1h),
                               # hot/just-listed releases re-checked far sooner. ~4 min/run at 60 req/min.
           MODE: balanced
+          MIN_REFERENCE: '25'      # skip low-value records: VG+ suggestion must be >= EUR25 (kills noise, keeps diamonds)
+          SHIPPING_ESTIMATE: '5'   # add EUR5 to the item price; the alert threshold uses the total
         run: node watch-once.js
 
       - name: Publish deals.json for the dashboard

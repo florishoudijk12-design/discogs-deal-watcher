@@ -34,12 +34,34 @@
 
   <section class="filters">
     <input type="search" id="search" placeholder="Search artist or title…" />
-    <label class="f">Min discount
-      <input type="range" id="minDiscount" min="0" max="90" step="5" value="0" />
-      <span id="minDiscountVal">0%</span>
+    <label class="f">Min value (VG+)
+      <input type="range" id="minValue" min="0" max="100" step="5" value="25" />
+      <span id="minValueVal">€25+</span>
     </label>
-    <label class="f checkbox"><input type="checkbox" id="freshOnly" /> Just listed only</label>
-    <label class="f checkbox"><input type="checkbox" id="hideSuspicious" /> Hide “maybe below VG+”</label>
+    <label class="f">Min % off
+      <input type="range" id="minDiscount" min="40" max="95" step="5" value="50" />
+      <span id="minDiscountVal">50%</span>
+    </label>
+    <label class="f">Max total
+      <input type="range" id="maxTotal" min="0" max="150" step="5" value="0" />
+      <span id="maxTotalVal">any</span>
+    </label>
+    <label class="f">Shipping est.
+      <input type="range" id="shipEst" min="0" max="25" step="1" value="5" />
+      <span id="shipEstVal">€5</span>
+    </label>
+    <label class="f">Sort
+      <select id="sortBy">
+        <option value="best">Best first</option>
+        <option value="discount">Biggest % off</option>
+        <option value="total">Lowest total</option>
+        <option value="savings">Most € saved</option>
+        <option value="newest">Newest</option>
+      </select>
+    </label>
+    <label class="f checkbox"><input type="checkbox" id="freshOnly" /> Just listed</label>
+    <label class="f checkbox"><input type="checkbox" id="hideWorn" /> Hide possibly worn</label>
+    <label class="f checkbox"><input type="checkbox" id="hideSuspicious" /> Hide “maybe &lt;VG+”</label>
     <span class="spacer"></span>
     <span class="count" id="resultCount"></span>
   </section>

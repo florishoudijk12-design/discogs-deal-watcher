@@ -24,6 +24,9 @@ const SUGGESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // refresh weekly
 const DEFAULTS = {
   currency: 'EUR',
   minDiscount: 0.5,
+  minReference: 25,     // skip low-value records: the reference (VG+ suggestion) must be >= this €.
+                        //   Safe for diamonds — a high-value record always clears it; kills only noise.
+  shippingEstimate: 5,  // € added to the item price; the deal threshold uses the TOTAL (shipping counts).
   mode: 'balanced',     // 'balanced' | 'sensitive' | 'strict' (see engine.shouldFire)
   ownDropFactor: 0.4,   // balanced/strict: how far under its OWN usual lowest a copy must dip
   warmupMin: 4,         // observations before a release can alert (learns its floor first)
@@ -46,6 +49,8 @@ function loadConfig() {
     userAgent: env.DISCOGS_USER_AGENT || file.userAgent || undefined,
     currency: env.CURRENCY || file.currency || DEFAULTS.currency,
     minDiscount: env.MIN_DISCOUNT ? parseFloat(env.MIN_DISCOUNT) : (file.minDiscount ?? DEFAULTS.minDiscount),
+    minReference: env.MIN_REFERENCE ? parseFloat(env.MIN_REFERENCE) : (file.minReference ?? DEFAULTS.minReference),
+    shippingEstimate: env.SHIPPING_ESTIMATE ? parseFloat(env.SHIPPING_ESTIMATE) : (file.shippingEstimate ?? DEFAULTS.shippingEstimate),
     mode: env.MODE || file.mode || DEFAULTS.mode,
     dashboardPort: env.PORT ? parseInt(env.PORT, 10) : (env.DASHBOARD_PORT ? parseInt(env.DASHBOARD_PORT, 10) : (file.dashboardPort ?? DEFAULTS.dashboardPort)),
     dashboardToken: env.DASHBOARD_TOKEN || file.dashboardToken || '',
@@ -83,12 +88,14 @@ async function processRelease(rel, deps) {
   const freshListing = engine.isFreshListing(prevObs, curObs);
 
   // Cached, weekly-refreshed price suggestions (token required; ignore failures).
+  // We keep the FULL per-condition ladder now (for impliedGrade), not just VG+/VG.
   let sug = store.getSuggestion(rel.releaseId);
-  if (config.token && (!sug || Date.now() - sug.ts > SUGGESTION_TTL_MS)) {
+  if (config.token && (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS)) {
     try {
       const raw = await client.getPriceSuggestions(rel.releaseId);
       if (raw) {
-        sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null };
+        const ladder = engine.extractLadder(raw);
+        sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder };
         store.setSuggestion(rel.releaseId, sug);
       }
     } catch (e) { /* unavailable -> trailing-median fallback */ }
@@ -100,9 +107,10 @@ async function processRelease(rel, deps) {
     lowest: stats.lowestPrice,
     suggestion: sug ? sug.vgplus : null,
     suggestionLow: sug ? sug.vg : null,
+    ladder: sug ? sug.ladder : null,
     trailingMedian,
     prevAlertedLowest: alerted ? alerted.lowest : null,
-  }, { minDiscount: config.minDiscount });
+  }, { minDiscount: config.minDiscount, minReference: config.minReference, shippingEstimate: config.shippingEstimate });
 
   // Apply the sensitivity profile + warm-up (warm-up uses how many times we've seen this release).
   // A just-listed copy at a new-low deal price fires in balanced mode even without an own-dip.
@@ -124,6 +132,11 @@ async function processRelease(rel, deps) {
     reference: sig.reference,
     referenceSource: sig.referenceSource,
     discount: sig.discount,
+    effectiveDiscount: sig.effectiveDiscount,
+    total: sig.total,
+    shippingEstimate: config.shippingEstimate,
+    impliedGrade: sig.impliedGrade,
+    pricedAsWorn: sig.pricedAsWorn,
     ownDrop: sig.ownDrop,
     confidence: sig.confidence,
     suspicious: sig.suspicious,

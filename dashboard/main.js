@@ -155,21 +155,25 @@ async function runScrape(win) {
         store.pushObservation(rel.releaseId, curObs);
 
         if (stats.numForSale > 0 && stats.lowestPrice != null) {
-          // Reference: cached/fresh VG+ suggestion, else this release's own trailing median.
+          // Reference: cached/fresh VG+ suggestion (full ladder), else this release's own trailing median.
           let sug = store.getSuggestion(rel.releaseId);
-          if (!sug || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
+          if (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
             try {
               const raw = await client.getPriceSuggestions(rel.releaseId);
-              if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null }; store.setSuggestion(rel.releaseId, sug); }
+              if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) }; store.setSuggestion(rel.releaseId, sug); }
             } catch { /* no suggestion -> trailing-median fallback */ }
           }
+          // Collect PERMISSIVELY (item discount >= 40%, no value/shipping floor) and let the
+          // dashboard sliders narrow it live — so the user can dial in suggested-price, % off,
+          // budget and shipping without re-scanning, and never miss the €2-for-€100 diamond.
           const sig = engine.evaluateMarketSignal({
             lowest: stats.lowestPrice,
             suggestion: sug ? sug.vgplus : null,
             suggestionLow: sug ? sug.vg : null,
+            ladder: sug ? sug.ladder : null,
             trailingMedian: store.trailingMedianLowest(rel.releaseId, config.trailingN),
             prevAlertedLowest: null, // manual scan: show every current bargain, no dedupe
-          }, { minDiscount: config.minDiscount });
+          }, { minDiscount: 0.4 });
 
           if (sig.meetsThreshold) {
             deals.push({
@@ -177,6 +181,7 @@ async function runScrape(win) {
               releaseId: rel.releaseId, title: rel.title, artist: rel.artist, year: rel.year, thumb: rel.thumb,
               lowest: stats.lowestPrice, currency: stats.currency || config.currency, numForSale: stats.numForSale,
               reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
+              impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn,
               ownDrop: sig.ownDrop, confidence: sig.confidence, suspicious: sig.suspicious,
               freshListing: engine.isFreshListing(prevObs, curObs),
               url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,

@@ -149,26 +149,61 @@ function median(nums) {
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
+// Pull a clean { gradeLabel: value } ladder out of the raw price_suggestions response.
+function extractLadder(raw) {
+  if (!raw) return null;
+  const ladder = {};
+  for (const g of CONDITIONS) { const v = raw[g] && raw[g].value; if (typeof v === 'number') ladder[g] = v; }
+  return Object.keys(ladder).length ? ladder : null;
+}
+
+/*
+ * impliedGrade(lowest, ladder) — what condition the cheapest copy is *priced* like.
+ * Sellers price by grade, so the best grade whose suggested price the listing still meets is a
+ * rough read on its condition (the API never tells us the real grade). Returns a grade label, or
+ * null when the price is below even the worst listed grade (priced like a damaged copy — which,
+ * crucially, is ALSO what a once-in-a-lifetime mispriced steal looks like, so we never auto-exclude
+ * on this; it's surfaced for the user to judge).
+ */
+function impliedGrade(lowest, ladder) {
+  const low = num(lowest);
+  if (low == null || !ladder) return null;
+  for (const g of CONDITIONS) { const v = num(ladder[g]); if (v != null && low >= v) return g; } // best -> worst
+  return null;
+}
+
+// "Priced like a Good-or-worse (worn) copy" — for an optional "hide possibly-damaged" filter.
+function pricedAsWorn(lowest, ladder) {
+  if (!ladder) return false;
+  const g = impliedGrade(lowest, ladder);
+  return g == null || conditionRank(g) >= conditionRank('Good (G)');
+}
+
 /*
  * evaluateMarketSignal(input, opts) where
  *   input: {
  *     lowest            number   current cheapest price (any condition)
  *     suggestion        number?  suggested price for VG+ (preferred reference)
  *     suggestionLow     number?  suggested price for VG (used for "suspiciously low")
+ *     ladder            object?  full { gradeLabel: value } suggestion ladder (for impliedGrade)
  *     trailingMedian    number?  median of this release's own recent lowest-prices
  *     prevAlertedLowest number?  lowest we last alerted on (for new-low dedupe)
  *   }
- *   opts: { minDiscount=0.5, newLowFactor=0.9 }
- * returns { isDeal, meetsThreshold, discount, reference, referenceSource,
- *           confidence, isNewLow, suspicious, reasons[] }
+ *   opts: { minDiscount=0.5, newLowFactor=0.9, minReference=0, shippingEstimate=0 }
+ *     minReference     — skip cheap records: require the reference price >= this (€). Safe for
+ *                        diamonds (a €100 record always clears it); only kills low-value noise.
+ *     shippingEstimate — added to the item price; the threshold uses the TOTAL (shipping matters).
+ * returns { isDeal, meetsThreshold, discount, effectiveDiscount, total, reference, referenceSource,
+ *           minReferenceOk, confidence, isNewLow, suspicious, impliedGrade, pricedAsWorn, reasons[] }
  */
 function evaluateMarketSignal(input, opts = {}) {
-  const { lowest, suggestion, suggestionLow, trailingMedian, prevAlertedLowest } = input;
-  const { minDiscount = 0.5, newLowFactor = 0.9 } = opts;
+  const { lowest, suggestion, suggestionLow, ladder, trailingMedian, prevAlertedLowest } = input;
+  const { minDiscount = 0.5, newLowFactor = 0.9, minReference = 0, shippingEstimate = 0 } = opts;
   const reasons = [];
   const low = num(lowest);
   const sug = num(suggestion);
   const tm = num(trailingMedian);
+  const ship = num(shippingEstimate) || 0;
 
   // "Own dip": how far below the release's OWN usual lowest the current price sits.
   // This is the flood-killer — a standing cheap copy has ownDrop ~0; only a genuinely
@@ -182,13 +217,20 @@ function evaluateMarketSignal(input, opts = {}) {
   if (sug != null && sug > 0) { reference = sug; referenceSource = 'suggestion'; }
   else if (tm != null && tm > 0) { reference = tm; referenceSource = 'trailing-median'; }
 
-  const base = { isDeal: false, meetsThreshold: false, discount: null, ownDrop, reference, referenceSource, confidence: 0, isNewLow: false, suspicious: false, reasons };
+  const grade = impliedGrade(low, ladder);
+  const worn = pricedAsWorn(low, ladder);
+  const base = { isDeal: false, meetsThreshold: false, discount: null, effectiveDiscount: null, total: null, ownDrop, reference, referenceSource, minReferenceOk: false, confidence: 0, isNewLow: false, suspicious: false, impliedGrade: grade, pricedAsWorn: worn, reasons };
   if (low == null || low <= 0) { reasons.push('no current price'); return base; }
   if (reference == null) { reasons.push('no reference price'); return base; }
 
-  const discount = 1 - low / reference;
-  const meetsThreshold = discount >= minDiscount;
-  if (!meetsThreshold) reasons.push('not cheap enough');
+  const total = low + ship;
+  const discount = 1 - low / reference;            // item-only
+  const effectiveDiscount = 1 - total / reference; // including the shipping estimate
+  const meetsThreshold = effectiveDiscount >= minDiscount;
+  if (!meetsThreshold) reasons.push('not cheap enough (incl. shipping estimate)');
+
+  const minReferenceOk = reference >= minReference;
+  if (!minReferenceOk) reasons.push('reference below min value');
 
   // Agreement across independent references raises confidence.
   let agree = 0;
@@ -209,7 +251,7 @@ function evaluateMarketSignal(input, opts = {}) {
   let confidence = agree;
   if (suspicious) confidence = Math.max(0, confidence - 1);
 
-  return { isDeal: meetsThreshold && isNewLow, meetsThreshold, discount, ownDrop, reference, referenceSource, confidence, isNewLow, suspicious, reasons };
+  return { isDeal: meetsThreshold && isNewLow && minReferenceOk, meetsThreshold, discount, effectiveDiscount, total, ownDrop, reference, referenceSource, minReferenceOk, confidence, isNewLow, suspicious, impliedGrade: grade, pricedAsWorn: worn, reasons };
 }
 
 /*
@@ -303,6 +345,9 @@ module.exports = {
   shouldFire,
   isFreshListing,
   releaseWatchScore,
+  extractLadder,
+  impliedGrade,
+  pricedAsWorn,
   median,
   num,
   releaseMarketUrl,
@@ -403,6 +448,42 @@ if (require.main === module && process.argv.includes('--selftest')) {
   // ownDrop: current 5 vs own usual lowest 20 -> 75% under its own floor.
   s = evaluateMarketSignal({ lowest: 5, suggestion: 40, suggestionLow: 22, trailingMedian: 20, prevAlertedLowest: null }, { minDiscount: 0.5 });
   assert.ok(Math.abs(s.ownDrop - 0.75) < 1e-9, 'ownDrop computed vs trailing median');
+
+  // --- minReference (value floor) ---
+  // 60% off a €30 record is a deal; the SAME 60% off a €10 record is filtered by a €25 floor.
+  s = evaluateMarketSignal({ lowest: 12, suggestion: 30, prevAlertedLowest: null }, { minDiscount: 0.5, minReference: 25 });
+  assert.ok(s.isDeal && s.minReferenceOk, 'reference 30 >= 25 -> passes the value floor');
+  s = evaluateMarketSignal({ lowest: 4, suggestion: 10, prevAlertedLowest: null }, { minDiscount: 0.5, minReference: 25 });
+  assert.ok(!s.isDeal && !s.minReferenceOk && s.meetsThreshold, 'reference 10 < 25 -> below value floor, not a deal (but still met the discount)');
+  // The diamond survives the floor: a €2 copy of a €100 record.
+  s = evaluateMarketSignal({ lowest: 2, suggestion: 100, prevAlertedLowest: null }, { minDiscount: 0.5, minReference: 25 });
+  assert.ok(s.isDeal && s.minReferenceOk, 'the €2-for-€100 diamond clears the value floor');
+
+  // --- shipping estimate folds into the threshold ---
+  // item €10 vs €30 = 67% off, but +€8 shipping = €18 total = 40% off -> below 50%.
+  s = evaluateMarketSignal({ lowest: 10, suggestion: 30, prevAlertedLowest: null }, { minDiscount: 0.5, shippingEstimate: 8 });
+  assert.ok(!s.meetsThreshold, 'shipping pushes the total over the threshold');
+  assert.strictEqual(s.total, 18, 'total = item + shipping estimate');
+  assert.ok(Math.abs(s.discount - (1 - 10 / 30)) < 1e-9, 'item discount unchanged');
+  assert.ok(Math.abs(s.effectiveDiscount - (1 - 18 / 30)) < 1e-9, 'effective discount includes shipping');
+  // the diamond still wins even with shipping: €2 + €15 ship = €17 vs €100 = 83% off.
+  s = evaluateMarketSignal({ lowest: 2, suggestion: 100, prevAlertedLowest: null }, { minDiscount: 0.5, shippingEstimate: 15 });
+  assert.ok(s.meetsThreshold && s.effectiveDiscount > 0.8, 'shipping barely dents a true diamond');
+
+  // --- impliedGrade / extractLadder / pricedAsWorn ---
+  const raw = { 'Mint (M)': { value: 50 }, 'Near Mint (NM or M-)': { value: 40 }, 'Very Good Plus (VG+)': { value: 30 }, 'Very Good (VG)': { value: 18 }, 'Good Plus (G+)': { value: 12 }, 'Good (G)': { value: 8 } };
+  const ladder = extractLadder(raw);
+  assert.strictEqual(ladder['Very Good Plus (VG+)'], 30, 'extractLadder pulls grade values');
+  assert.strictEqual(impliedGrade(30, ladder), 'Very Good Plus (VG+)', 'priced at the VG+ suggestion -> implied VG+');
+  assert.strictEqual(impliedGrade(15, ladder), 'Good Plus (G+)', '€15 is priced like a G+ copy');
+  assert.strictEqual(impliedGrade(5, ladder), null, '€5 is below even the Good suggestion -> null (likely worn OR a steal)');
+  assert.strictEqual(pricedAsWorn(20, ladder), false, '€20 (priced as VG) is not "worn"');
+  assert.strictEqual(pricedAsWorn(9, ladder), true, '€9 (priced as Good) is "worn"');
+  assert.strictEqual(pricedAsWorn(5, ladder), true, '€5 (below Good) is "worn"');
+  // signal carries the implied grade through
+  s = evaluateMarketSignal({ lowest: 6, suggestion: 30, suggestionLow: 18, ladder, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.strictEqual(s.impliedGrade, null, '€6 cheapest -> priced below Good');
+  assert.ok(s.pricedAsWorn && s.suspicious && s.isDeal, 'still a deal, but flagged worn + suspicious for the user to judge');
 
   // --- shouldFire (warm-up + profiles) ---
   // A genuine dip: cheap vs suggestion AND a big own-dip.

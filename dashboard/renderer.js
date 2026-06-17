@@ -4,6 +4,11 @@
  * When window.api is absent (a plain browser preview), it falls back to DEMO data so the layout
  * is still viewable.
  *
+ * Philosophy: detect PERMISSIVELY (the scan / cloud collect every bargain), then filter POWERFULLY
+ * here. All the sliders (min value, % off, max total, shipping estimate) and the sort run live in
+ * the browser over the loaded deals — so dialling in "show me the real diamonds" never needs a
+ * re-scan and never throws away the €2-for-€100 outlier.
+ *
  * Two view modes:
  *   'cloud' — passive: deals the cloud watcher already found (polled every 30s). The default.
  *   'scan'  — the results of a local "⚡ Scan now" full sweep. Polling pauses while shown.
@@ -12,9 +17,10 @@
 const hasApi = typeof window.api !== 'undefined';
 
 const DEMO = [
-  { id: 'demo1', releaseId: 249504, artist: 'Imagination', title: 'Night Dubbing', lowest: 8.5, currency: 'EUR', numForSale: 14, reference: 32, referenceSource: 'suggestion', discount: 0.73, confidence: 2, suspicious: false, freshListing: true, url: 'https://www.discogs.com/sell/release/249504?sort=price%2Casc', ts: Date.now() - 4 * 60000, thumb: '' },
-  { id: 'demo2', releaseId: 12345, artist: 'Klein & M.B.O.', title: 'Dirty Talk', lowest: 4.0, currency: 'EUR', numForSale: 3, reference: 26, referenceSource: 'trailing-median', discount: 0.85, confidence: 1, suspicious: true, freshListing: false, url: 'https://www.discogs.com/sell/release/12345?sort=price%2Casc', ts: Date.now() - 32 * 60000, thumb: '' },
-  { id: 'demo3', releaseId: 67890, artist: 'Gino Soccio', title: 'Outline', lowest: 11.0, currency: 'EUR', numForSale: 22, reference: 24, referenceSource: 'suggestion', discount: 0.54, confidence: 2, suspicious: false, freshListing: false, url: 'https://www.discogs.com/sell/release/67890?sort=price%2Casc', ts: Date.now() - 90 * 60000, thumb: '' },
+  { id: 'demo1', releaseId: 249504, artist: 'Imagination', title: 'Night Dubbing', lowest: 8.5, currency: 'EUR', numForSale: 14, reference: 32, referenceSource: 'suggestion', discount: 0.73, confidence: 2, suspicious: false, pricedAsWorn: false, impliedGrade: 'Very Good Plus (VG+)', freshListing: true, ownDrop: 0.5, url: 'https://www.discogs.com/sell/release/249504?sort=price%2Casc', ts: Date.now() - 4 * 60000, thumb: '' },
+  { id: 'demo2', releaseId: 12345, artist: 'Klein & M.B.O.', title: 'Dirty Talk', lowest: 4.0, currency: 'EUR', numForSale: 3, reference: 26, referenceSource: 'trailing-median', discount: 0.85, confidence: 1, suspicious: true, pricedAsWorn: true, impliedGrade: null, freshListing: false, ownDrop: 0.7, url: 'https://www.discogs.com/sell/release/12345?sort=price%2Casc', ts: Date.now() - 32 * 60000, thumb: '' },
+  { id: 'demo3', releaseId: 67890, artist: 'Gino Soccio', title: 'Outline', lowest: 11.0, currency: 'EUR', numForSale: 22, reference: 24, referenceSource: 'suggestion', discount: 0.54, confidence: 2, suspicious: false, pricedAsWorn: false, impliedGrade: 'Very Good (VG)', freshListing: false, ownDrop: 0.2, url: 'https://www.discogs.com/sell/release/67890?sort=price%2Casc', ts: Date.now() - 90 * 60000, thumb: '' },
+  { id: 'demo4', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 2.0, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'suggestion', discount: 0.98, confidence: 2, suspicious: true, pricedAsWorn: true, impliedGrade: null, freshListing: true, ownDrop: 0.9, url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 1 * 60000, thumb: '' },
 ];
 
 let allDeals = [];
@@ -28,7 +34,11 @@ const sym = (c) => ({ EUR: '€', USD: '$', GBP: '£' }[c] || '');
 const money = (v, c) => (v == null ? '—' : sym(c) + Number(v).toFixed(2));
 const pct = (d) => (d == null ? '—' : Math.round(d * 100) + '%');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
-const REF_LABEL = { suggestion: 'VG+ suggested price', 'trailing-median': 'its usual lowest' };
+const REF_LABEL = { suggestion: 'VG+ suggested', 'trailing-median': 'usual lowest' };
+
+// "Very Good Plus (VG+)" -> "VG+"
+const gradeShort = (g) => { if (!g) return null; const m = String(g).match(/\(([^)]+)\)/); return m ? m[1] : g; };
+const GOOD_GRADES = new Set(['M', 'NM or M-', 'VG+']);
 
 function ago(ts) {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -38,13 +48,43 @@ function ago(ts) {
   return Math.floor(s / 86400) + 'd ago';
 }
 
+const shipVal = () => parseFloat($('shipEst').value) || 0;
+
+// Attach shipping-aware totals + a ranking score to a deal, from the current shipping slider.
+function enrich(d) {
+  const ship = shipVal();
+  const ref = d.reference;
+  const total = d.lowest != null ? d.lowest + ship : null;
+  const eff = (ref && total != null) ? 1 - total / ref : (d.discount ?? null);
+  const savings = (ref && total != null) ? ref - total : null;
+  let score = (eff || 0) * 40 + Math.min(Math.max(savings || 0, 0), 80) / 80 * 40 + (d.ownDrop || 0) * 20;
+  const n = d.numForSale;
+  if (n != null) score += n <= 3 ? 15 : (n <= 10 ? 7 : 0);
+  if (d.freshListing) score += 10;
+  if (d.pricedAsWorn) score -= 12;
+  if (d.suspicious) score -= 5;
+  return Object.assign({}, d, { _ship: ship, _total: total, _eff: eff, _savings: savings, _score: score });
+}
+
+function gradeChip(d) {
+  if (d.impliedGrade) { // a known grade label
+    const g = gradeShort(d.impliedGrade);
+    const cls = d.pricedAsWorn ? 'warn' : (GOOD_GRADES.has(g) ? 'good' : '');
+    return `<span class="tag ${cls}">≈ priced as ${esc(g)}</span>`;
+  }
+  if (d.impliedGrade === null) return `<span class="tag warn">≈ ≤ Good · very cheap</span>`; // computed: below Good
+  if (d.suspicious) return `<span class="tag warn">⚠ maybe below VG+</span>`; // legacy record, no ladder data
+  return '';
+}
+
 function card(d) {
   const conf = typeof d.confidence === 'number' ? `<span class="tag conf-${d.confidence}">confidence ${d.confidence}/2</span>` : '';
-  const susp = d.suspicious ? `<span class="tag warn">⚠ maybe below VG+</span>` : '';
   const fresh = d.freshListing ? `<span class="tag fresh">🆕 just listed</span>` : '';
   const thumb = d.thumb
     ? `<img class="thumb" src="${esc(d.thumb)}" alt="" referrerpolicy="no-referrer" />`
     : `<div class="thumb"></div>`;
+  const shipNote = d._ship > 0 ? `${money(d.lowest, d.currency)} item + ${money(d._ship, d.currency)} ship est.` : `${money(d.lowest, d.currency)} item · no shipping added`;
+  const save = d._savings != null ? ` · save ${money(d._savings, d.currency)}` : '';
   return `<article class="card${d.freshListing ? ' is-fresh' : ''}">
     <span class="when">${viewMode === 'scan' ? 'live' : ago(d.ts)}</span>
     ${thumb}
@@ -52,11 +92,12 @@ function card(d) {
       <p class="title">${esc(d.title || 'Release ' + d.releaseId)}</p>
       <p class="artist">${esc(d.artist || '')}</p>
       <div class="price-row">
-        <span class="price">${money(d.lowest, d.currency)}</span>
-        <span class="discount">${pct(d.discount)} off</span>
+        <span class="price">${money(d._total, d.currency)}</span>
+        <span class="discount">${pct(d._eff)} off</span>
       </div>
-      <div class="ref">vs ${money(d.reference, d.currency)} · ${REF_LABEL[d.referenceSource] || 'reference'} · ${esc(String(d.numForSale ?? '?'))} for sale</div>
-      <div class="meta">${fresh}${conf}${susp}</div>
+      <div class="subprice">${shipNote}</div>
+      <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${save} · ${esc(String(d.numForSale ?? '?'))} for sale</div>
+      <div class="meta">${fresh}${gradeChip(d)}${conf}</div>
       <button class="buy" data-url="${esc(d.url)}">View &amp; buy on Discogs →</button>
     </div>
   </article>`;
@@ -64,13 +105,19 @@ function card(d) {
 
 function applyFilters(deals) {
   const q = $('search').value.trim().toLowerCase();
+  const minV = parseFloat($('minValue').value) || 0;
   const minD = parseInt($('minDiscount').value, 10) / 100;
-  const hideSusp = $('hideSuspicious').checked;
+  const maxT = parseFloat($('maxTotal').value) || 0;
   const freshOnly = $('freshOnly').checked;
+  const hideWorn = $('hideWorn').checked;
+  const hideSusp = $('hideSuspicious').checked;
   return deals.filter((d) => {
-    if (hideSusp && d.suspicious) return false;
+    if (minV > 0 && (d.reference == null || d.reference < minV)) return false;
+    if ((d._eff ?? 0) < minD) return false;
+    if (maxT > 0 && (d._total == null || d._total > maxT)) return false;
     if (freshOnly && !d.freshListing) return false;
-    if ((d.discount ?? 0) < minD) return false;
+    if (hideWorn && d.pricedAsWorn) return false;
+    if (hideSusp && d.suspicious) return false;
     if (q) {
       const hay = `${d.artist || ''} ${d.title || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
@@ -79,16 +126,28 @@ function applyFilters(deals) {
   });
 }
 
+function sortDeals(list, mode) {
+  const c = list.slice();
+  if (mode === 'discount') c.sort((a, b) => (b._eff ?? 0) - (a._eff ?? 0));
+  else if (mode === 'total') c.sort((a, b) => (a._total ?? 1e9) - (b._total ?? 1e9));
+  else if (mode === 'savings') c.sort((a, b) => (b._savings ?? 0) - (a._savings ?? 0));
+  else if (mode === 'newest') c.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  else c.sort((a, b) => (b._score ?? 0) - (a._score ?? 0)); // best
+  return c;
+}
+
 function render() {
-  const deals = applyFilters(allDeals);
+  const enriched = allDeals.map(enrich);
+  let deals = applyFilters(enriched);
+  deals = sortDeals(deals, $('sortBy').value);
   const wrap = $('deals');
   const empty = $('empty');
-  $('resultCount').textContent = deals.length ? `${deals.length} deal${deals.length > 1 ? 's' : ''}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
+  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
   if (!deals.length) {
     wrap.innerHTML = '';
     empty.classList.remove('hidden');
-    empty.textContent = allDeals.length ? 'No deals match your filters.'
-      : (viewMode === 'scan' ? 'Scan finished — no copies are currently below your discount threshold.'
+    empty.textContent = allDeals.length ? 'No deals match your filters — loosen the sliders.'
+      : (viewMode === 'scan' ? 'Scan finished — nothing currently meets the discount threshold.'
         : 'No deals yet — the watcher fills this in as cheap copies appear. Or hit ⚡ Scan now.');
     return;
   }
@@ -189,13 +248,13 @@ function onScanProgress(m) {
   if (m.phase === 'wantlist') { $('scan-text').textContent = 'Fetching your wantlist…'; $('scan-fill').style.width = '3%'; return; }
   if (m.phase === 'done') {
     $('scan-fill').style.width = '100%';
-    $('scan-text').textContent = `Done — checked ${m.checked}, ${m.found} bargain${m.found === 1 ? '' : 's'}${m.aborted ? ' (stopped early)' : ''}.`;
+    $('scan-text').textContent = `Done — checked ${m.checked}, ${m.found} candidate${m.found === 1 ? '' : 's'}${m.aborted ? ' (stopped early)' : ''}.`;
     return;
   }
   const total = m.total || 1;
   const pctDone = Math.min(100, Math.round((m.checked / total) * 100));
   $('scan-fill').style.width = pctDone + '%';
-  $('scan-text').textContent = `Scanning ${m.checked}/${total} · ${m.found} bargain${m.found === 1 ? '' : 's'} · ${fmtEta(total - m.checked)}`;
+  $('scan-text').textContent = `Scanning ${m.checked}/${total} · ${m.found} found · ${fmtEta(total - m.checked)}`;
 }
 
 // --- Settings modal ---
@@ -263,10 +322,16 @@ window.addEventListener('DOMContentLoaded', () => {
   $('set-save').addEventListener('click', saveSettings);
   $('set-test-btn').addEventListener('click', testConnection);
   $('set-sourceType').addEventListener('change', toggleSrc);
+
   $('search').addEventListener('input', render);
-  $('hideSuspicious').addEventListener('change', render);
+  $('sortBy').addEventListener('change', render);
   $('freshOnly').addEventListener('change', render);
+  $('hideWorn').addEventListener('change', render);
+  $('hideSuspicious').addEventListener('change', render);
+  $('minValue').addEventListener('input', () => { const v = parseInt($('minValue').value, 10); $('minValueVal').textContent = v > 0 ? `€${v}+` : 'any'; render(); });
   $('minDiscount').addEventListener('input', () => { $('minDiscountVal').textContent = $('minDiscount').value + '%'; render(); });
+  $('maxTotal').addEventListener('input', () => { const v = parseInt($('maxTotal').value, 10); $('maxTotalVal').textContent = v > 0 ? `€${v}` : 'any'; render(); });
+  $('shipEst').addEventListener('input', () => { $('shipEstVal').textContent = '€' + $('shipEst').value; render(); });
 
   if (hasApi) window.api.onScrapeProgress(onScanProgress);
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
