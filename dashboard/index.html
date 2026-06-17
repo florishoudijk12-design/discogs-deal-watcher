@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline';" />
+  <title>Discogs Deal Watcher</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Discogs Deal Watcher</h1>
+    </div>
+    <div class="status" id="status">
+      <span class="pill" id="pill-conn">connecting…</span>
+      <span class="pill" id="pill-wantlist">—</span>
+      <span class="pill" id="pill-deals">—</span>
+      <span class="pill" id="pill-sweep">—</span>
+    </div>
+    <div class="actions">
+      <button id="btn-refresh" title="Refresh now">↻</button>
+      <button id="btn-settings" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <section class="filters">
+    <input type="search" id="search" placeholder="Search artist or title…" />
+    <label class="f">Min discount
+      <input type="range" id="minDiscount" min="0" max="90" step="5" value="0" />
+      <span id="minDiscountVal">0%</span>
+    </label>
+    <label class="f checkbox"><input type="checkbox" id="hideSuspicious" /> Hide “maybe below VG+”</label>
+    <span class="spacer"></span>
+    <span class="count" id="resultCount"></span>
+  </section>
+
+  <main id="deals" class="deals"></main>
+  <div id="empty" class="empty hidden"></div>
+
+  <!-- Settings modal -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Settings</h2>
+      <p class="hint">Where should the dashboard read deals from?</p>
+      <label>Source
+        <select id="set-sourceType">
+          <option value="server">Live server — watcher.js on Fly / localhost</option>
+          <option value="github">GitHub Actions — reads the committed deals.json</option>
+        </select>
+      </label>
+      <div class="src src-server">
+        <label>Server URL
+          <input type="text" id="set-apiBase" placeholder="https://your-watcher.fly.dev  or  http://localhost:8787" />
+        </label>
+        <label>Dashboard token
+          <input type="password" id="set-token" placeholder="the DASHBOARD_TOKEN you set on the server" />
+        </label>
+      </div>
+      <div class="src src-github hidden">
+        <label>GitHub repo (owner/name)
+          <input type="text" id="set-githubRepo" placeholder="norsnors/discogs-deal-watcher" />
+        </label>
+        <label>GitHub access token (needed for a private repo)
+          <input type="password" id="set-githubToken" placeholder="fine-grained PAT, Contents: read-only" />
+        </label>
+      </div>
+      <div id="set-test" class="test-result"></div>
+      <div class="modal-actions">
+        <button id="set-test-btn" class="ghost">Test connection</button>
+        <span class="spacer"></span>
+        <button id="set-cancel" class="ghost">Cancel</button>
+        <button id="set-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

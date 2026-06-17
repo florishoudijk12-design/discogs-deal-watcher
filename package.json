@@ -1,0 +1,18 @@
+{
+  "name": "discogs-deal-watcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Watches your Discogs wantlist and alerts you when a copy is offered far under its median price.",
+  "main": "watcher.js",
+  "scripts": {
+    "selftest": "node engine.js --selftest && node discogs.js --selftest && node store.js --selftest && node mailer.js --selftest && node watcher.js --itest",
+    "e2e": "node live-e2e.cjs",
+    "once": "node watch-once.js",
+    "watch": "node watcher.js",
+    "start": "node watcher.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.14"
+  },
+  "engines": { "node": ">=20" }
+}

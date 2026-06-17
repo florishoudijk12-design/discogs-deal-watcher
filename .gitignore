@@ -1,0 +1,10 @@
+node_modules/
+state/
+config.json
+.env
+*.log
+.DS_Store
+dist/
+
+# local dashboard preview copy (not for git)
+dashboard/deals.json

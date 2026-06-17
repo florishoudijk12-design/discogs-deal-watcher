@@ -1,0 +1,206 @@
+# Discogs Deal Watcher
+
+Watches your Discogs **wantlist** and alerts you (email + desktop dashboard) when a copy is
+offered **far under its median price** (e.g. ≥ 50% below) **in VG+ or better** condition, with a
+direct link so you can buy it immediately.
+
+> Status: **early scaffold.** The acquisition layer (how marketplace data is fetched) is still
+> being decided — see "The Cloudflare wall" below.
+
+## The Cloudflare wall (the dominant constraint — read this first)
+
+Discogs splits into two surfaces with very different access:
+
+| Surface | Reachable from a plain fetch / cloud server? | Gives us |
+|---|---|---|
+| **`api.discogs.com`** (official API, token auth) | ✅ yes | wantlist; release metadata; per-release **lowest price + count** (`marketplace/stats`); **per-condition suggested price** (`marketplace/price_suggestions`, token required) |
+| **`www.discogs.com`** (marketplace pages, RSS) | ❌ **no — Cloudflare "Just a moment…" JS challenge (403)** | the actual **listings** (per-copy condition, shipping, seller), the **direct listing link**, and the **historical sales median** |
+
+Verified live (2026-06): `GET /marketplace/stats/249504` → `200 {num_for_sale, lowest_price}`;
+every `www.discogs.com/sell/...` URL (HTML *and* RSS) → `403` Cloudflare challenge.
+
+**Consequence:** two of the four things the goal asks for — the **historical sales median** and
+**per-listing condition / shipping / direct link** — live on `www.discogs.com` and cannot be read
+from a cloud server. They can only be read from a **real, logged-in browser session on a
+residential IP** (the Cloudflare `cf_clearance` cookie is IP-bound, so copying cookies to a cloud
+box does not work). The official API alone can detect *that something cheap exists* but not its
+condition, true median, shipping, or exact listing.
+
+This is why the deployment shape is a deliberate decision, not an afterthought.
+
+## Decisions locked in (from `/goal` Q&A)
+
+- **Email:** Gmail via app-password (SMTP / nodemailer). *Note: rules out Cloudflare Workers — they can't open SMTP — so the always-on piece is a Node host, not a Worker.*
+- **Reference price for "too cheap":** Discogs **historical sales median** (web-page only → needs the residential scraper).
+- **Sellers:** worldwide, but **item + shipping** is the price that's compared (high shipping must not disguise a "cheap" item).
+- **Condition floor:** media condition **VG+ or better**.
+
+## How it decides "much too cheap" (API-only mode)
+
+The API can't see a listing's condition or the true sales median, so the watcher makes the best
+call it can and is honest about the uncertainty:
+
+- **Reference price** = the per-condition **VG+ suggested price** (`marketplace/price_suggestions`,
+  token required). If that's unavailable, it falls back to the release's own **trailing median of
+  lowest-prices** (what it has normally been selling at, learned from our own polling history).
+- **Deal** = a **new low** that is **≥ `minDiscount` (default 50%)** under that reference. "New low"
+  dedupe means a standing cheap copy is emailed once, not every sweep; a *further* drop re-alerts.
+- **Confidence 0–2** = how many independent references (suggestion + trailing median) agree it's a
+  deal. **"⚠ maybe below VG+"** is flagged when the price dips below even a VG copy's fair price —
+  a hint the cheapest copy might be a low-grade copy, since the API won't tell us its condition.
+- The email/dashboard link opens the release marketplace **sorted price-ascending**, so the cheap
+  copy is the first row — you confirm its real condition + shipping there in one click.
+
+### Calibration (`mode`) — why a naive rule floods you
+
+A real run against a 715-release vinyl wantlist showed a flat "≥50% under VG+ suggestion" rule trips
+on **~60% of releases**, almost all flagged "maybe <VG+" — because a wantlist nearly always has a
+cheap *worn* copy sitting around, and the API hides condition. So the watcher adds a **warm-up + an
+own-dip gate**:
+
+- **Warm-up** (`warmupMin`, default 4): a release sends nothing until it's been seen a few times, so
+  the watcher first *learns its normal lowest price* instead of emailing every standing cheap copy on
+  the first sweep. At ~1 check/sec a release warms up within roughly an hour.
+- **`mode`** (default `balanced`):
+  - `balanced` — fire only when a copy is **≥`minDiscount` under the VG+ suggestion** *and* **≥`ownDropFactor` (40%) under that release's own usual lowest** (a genuine new dip). Standing cheap copies stay silent.
+  - `sensitive` — fire on any copy ≥`minDiscount` under the reference (standing copies included). Misses nothing, noisier.
+  - `strict` — `balanced` **and** the price is above the VG suggestion (priced like a decent-grade copy → closest to the literal "VG+ or better"). Fewest, highest-quality alerts.
+
+## Modules
+
+| File | Role | Test |
+|---|---|---|
+| `engine.js` | pure decision logic (condition grading, `evaluateMarketSignal`, dedupe, URLs) | `node engine.js --selftest` |
+| `discogs.js` | official-API client (wantlist, stats, suggestions, release), rate-limit aware | `node discogs.js --selftest` |
+| `store.js` | JSON-file store (history / alert memory / suggestions / deals) | `node store.js --selftest` |
+| `mailer.js` | Gmail SMTP + HTML deal-email renderer | `node mailer.js --selftest` |
+| `server.js` | tiny token-protected read API for the dashboard | — |
+| `watcher.js` | the paced sweep loop tying it together | `node watcher.js --itest` |
+| `dashboard/` | Electron desktop dashboard (reads the cloud API) | — |
+
+Run the whole suite: `npm run selftest`.
+
+**Proven end-to-end with real data** (`npm run e2e`, no secrets needed): pulls a real public Discogs
+wantlist, fetches real current marketplace prices, runs the real detection pipeline, and **sends a
+real alert email** via a throwaway Ethereal SMTP account — printing a preview URL of the message.
+(The reference baseline is the only simulated part; in production it's your token's VG+ suggestion or
+the trailing median learned over time.)
+
+## Get your credentials
+
+1. **Discogs personal access token** — Discogs → *Settings → Developers → Generate token*. Paste as
+   `token` / `DISCOGS_TOKEN`. (Also unlocks per-condition price suggestions; without it the watcher
+   runs anonymously at 25 req/min and uses only the trailing-median reference.)
+2. **Your Discogs username** — must own the wantlist. Wantlist is read via the API (works even if
+   private, because the token authenticates you).
+3. **Email sender — Resend API key (recommended, no Gmail password).** Sign up free at resend.com
+   (Google login), create an API key, paste it as `email.apiKey` / `RESEND_API_KEY`. Mail is sent
+   from `onboarding@resend.dev` (Resend's sandbox sender — no domain setup) to your `email.to`
+   (e.g. `riminiexpressdj@gmail.com`). The key is revocable and is **not** your Gmail password.
+   *Alternative:* Gmail via app-password (`email.provider: "gmail"`, `GMAIL_USER` +
+   `GMAIL_APP_PASSWORD`) — needs SMTP, so only on a Node host (not Workers / GitHub Actions-friendly).
+4. **Dashboard token** — invent a long random string; the watcher requires it on the API and the
+   desktop app sends it. (Only needed for the live-server deployment, not the GitHub one.)
+
+## Run locally (fastest way to try it)
+
+```powershell
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+Set-Location "Z:\Claude code\discogs-deal-watcher"
+Copy-Item config.example.json config.json   # then edit config.json with your values
+npm install
+npm start                                    # paced sweep + dashboard API on :8787
+```
+
+Then run the dashboard and point it at `http://localhost:8787`:
+
+```powershell
+Set-Location "Z:\Claude code\discogs-deal-watcher\dashboard"
+npm install
+npm start
+```
+
+In the dashboard's ⚙ Settings, pick source **Live server**, set URL = `http://localhost:8787` and
+**Dashboard token** = your `dashboardToken`, then *Test connection*.
+
+## The desktop dashboard
+
+`dashboard/` is a small Electron app. Run it:
+
+```powershell
+Set-Location "Z:\Claude code\discogs-deal-watcher\dashboard"
+npm install
+npm start                 # dev
+npm run build             # -> dist\DiscogsDeals-win32-x64\DiscogsDeals.exe (Windows .exe)
+```
+
+In ⚙ **Settings** pick where it reads deals from — this matches your deployment:
+
+- **Live server** (watcher.js on Fly / localhost): enter the **Server URL** + **Dashboard token**.
+- **GitHub Actions**: enter the **repo** (`owner/name`) + a **GitHub access token** (fine-grained PAT,
+  *Contents: read-only*). It reads the `deals.json` the workflow commits — no running server needed.
+
+It polls every 30s, filters (search / min-discount / hide "maybe <VG+"), and shows a desktop
+notification on a new deal. The HTTP to GitHub/your server happens in the Electron **main** process,
+so tokens never touch the page.
+
+## Deploy — two options
+
+### Option A — GitHub Actions (free, git-based; the periodic-scrape model)
+
+Push this folder to a GitHub repo. The included [`.github/workflows/watch.yml`](.github/workflows/watch.yml)
+runs `node watch-once.js` on a cron (default every 15 min): each run checks a **rotating slice** of
+the wantlist (`SLICE_SIZE`, default 50), carries state via the Actions cache, emails new dips via
+Resend, and commits `deals.json` for the dashboard. Add repo **Secrets**: `DISCOGS_TOKEN`,
+`DISCOGS_USERNAME`, `RESEND_API_KEY`, `MAIL_TO` (`riminiexpressdj@gmail.com`), `MAIL_FROM` (optional).
+
+- **Coverage:** full wantlist every ⌈N/SLICE_SIZE⌉ runs. 715 / 50 ≈ 15 runs ≈ ~3.7 h at 15-min
+  cadence. Raise `SLICE_SIZE` or the cron frequency for faster coverage.
+- **Cost:** private repos get 2000 Actions-min/mo free; runs are short (Resend needs no `npm install`),
+  so 15-min cadence fits. **Public repos = unlimited.** Note: GitHub pauses cron on a repo with no
+  activity for 60 days.
+
+### Option B — Fly.io (always-on, fastest coverage)
+
+`watcher.js` as a single 24/7 process — sweeps continuously (~15-min full coverage for 715 items) and
+serves the dashboard API. Uses the included `fly.toml` + `Dockerfile`.
+
+```bash
+fly launch --no-deploy
+fly volume create ddw_state --size 1 --region ams
+fly secrets set DISCOGS_TOKEN=... DISCOGS_USERNAME=Rimini_Express \
+  RESEND_API_KEY=re_... MAIL_TO=riminiexpressdj@gmail.com \
+  DASHBOARD_TOKEN=$(openssl rand -hex 24)
+fly deploy
+```
+
+Dashboard → source **Live server**, URL `https://<app>.fly.dev`, the `DASHBOARD_TOKEN`. (Any Node host
+— Railway, a €4 VPS — works: set env vars, `node watcher.js`, expose the port, mount a volume at `state/`.)
+
+### Environment variables
+
+| Var | Meaning |
+|---|---|
+| `DISCOGS_USERNAME` | whose wantlist to watch (required) |
+| `DISCOGS_TOKEN` | personal access token (recommended; enables price suggestions + 60/min) |
+| `RESEND_API_KEY` | Resend API key (recommended email path) |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Gmail alternative (SMTP; Node host only) |
+| `MAIL_TO` / `MAIL_FROM` | where alerts go / sender (default `onboarding@resend.dev`) |
+| `EMAIL_PROVIDER` | `resend` (default if key present) or `gmail` |
+| `MODE` | `balanced` (default) / `sensitive` / `strict` |
+| `SLICE_SIZE` | releases checked per `watch-once.js` run (GitHub model, default 50) |
+| `DASHBOARD_TOKEN` | bearer token the dashboard must send (live-server model) |
+| `PORT` | dashboard API port (default 8787) |
+| `MIN_DISCOUNT` | deal threshold, 0–1 (default 0.5) |
+| `CURRENCY` | price currency (default EUR) |
+
+## Known limitations (honest list)
+
+- **No per-copy condition / shipping / exact listing link** — those live behind Cloudflare. The
+  watcher detects *that* a cheap copy exists and links you to verify; it can't pre-filter condition
+  or add shipping to the comparison. The "⚠ maybe below VG+" flag is the partial mitigation.
+- **Reference is a *suggested* price, not the historical sales median** — the real median is
+  web-only. The VG+ suggestion is the closest API proxy; the trailing-median fallback is our own.
+- If you later decide the condition/shipping precision matters more than 24/7-cloud, the path is a
+  **local residential scraper** (a real logged-in browser session) that syncs into this same store +
+  dashboard — see the original design notes / git history.

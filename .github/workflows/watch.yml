@@ -1,0 +1,62 @@
+# Runs one rotating-slice sweep on a schedule (the "GitHub every few minutes" model).
+# State (history/cursor/alert-memory) is carried between runs via the Actions cache;
+# deals.json is committed so the desktop dashboard can read it via the GitHub API.
+#
+# Setup: push this folder to a GitHub repo, then add repo Secrets:
+#   DISCOGS_TOKEN, DISCOGS_USERNAME, RESEND_API_KEY, MAIL_TO (riminiexpressdj@gmail.com), MAIL_FROM
+#
+# Minutes note: scheduled runs cost Actions minutes on PRIVATE repos (2000/mo free). Each run is
+# short (no npm install needed for the Resend path). */15 ≈ within free tier; raise the interval if
+# you're close, or make the repo PUBLIC (Actions is unlimited for public repos).
+name: discogs-deal-watch
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every ~15 min (GitHub may delay under load)
+  workflow_dispatch: {}       # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write             # to commit deals.json back
+
+concurrency:
+  group: discogs-watch
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The Resend email path needs no npm packages. Gmail users: uncomment the next line.
+      # - run: npm ci --omit=dev
+
+      - name: Restore state (history / cursor / alert memory)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: ddw-state-${{ github.run_id }}
+          restore-keys: ddw-state-
+
+      - name: Run one sweep
+        env:
+          DISCOGS_TOKEN: ${{ secrets.DISCOGS_TOKEN }}
+          DISCOGS_USERNAME: ${{ secrets.DISCOGS_USERNAME }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          SLICE_SIZE: '50'
+          MODE: balanced
+        run: node watch-once.js
+
+      - name: Publish deals.json for the dashboard
+        run: |
+          git config user.name "deal-watcher"
+          git config user.email "deal-watcher@users.noreply.github.com"
+          git add deals.json
+          git commit -m "deals update [skip ci]" || echo "no changes"
+          git push || echo "nothing to push"

@@ -1,0 +1,31 @@
+{
+  "username": "YOUR_DISCOGS_USERNAME",
+  "token": "YOUR_DISCOGS_PERSONAL_ACCESS_TOKEN",
+  "userAgent": "DiscogsDealWatcher/0.1 (+mailto:you@example.com)",
+
+  "currency": "EUR",
+  "minDiscount": 0.5,
+  "mode": "balanced",
+  "ownDropFactor": 0.4,
+  "warmupMin": 4,
+  "trailingN": 30,
+  "wantlistRefreshMs": 21600000,
+
+  "dashboardPort": 8787,
+  "dashboardToken": "MAKE_THIS_A_LONG_RANDOM_STRING",
+  "sliceSize": 50,
+
+  "email": {
+    "provider": "resend",
+    "apiKey": "re_YOUR_RESEND_API_KEY",
+    "to": "riminiexpressdj@gmail.com",
+    "from": "Discogs Deal Watcher <onboarding@resend.dev>"
+  },
+
+  "_email_gmail_alternative": {
+    "provider": "gmail",
+    "user": "youraddress@gmail.com",
+    "appPassword": "16charAppPassword",
+    "to": "riminiexpressdj@gmail.com"
+  }
+}

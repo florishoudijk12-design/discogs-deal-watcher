@@ -1,0 +1,31 @@
+# Fly.io config for the always-on watcher. The machine must NOT auto-stop —
+# a deal watcher has to keep sweeping. Secrets are set with `fly secrets set` (see README).
+app = "discogs-deal-watcher"
+primary_region = "ams"
+
+[build]
+
+[env]
+  PORT = "8787"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/healthz"
+
+[mounts]
+  source = "ddw_state"
+  destination = "/app/state"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

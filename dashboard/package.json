@@ -1,0 +1,15 @@
+{
+  "name": "discogs-deal-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop dashboard for the Discogs Deal Watcher — shows recent wantlist deals from the cloud watcher.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-packager . DiscogsDeals --platform=win32 --arch=x64 --out=dist --overwrite"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-packager": "^17.1.2"
+  }
+}
