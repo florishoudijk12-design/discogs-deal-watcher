@@ -383,8 +383,15 @@ function shouldFire(sig, historyCount, opts = {}) {
   if (mode === 'sensitive') return sig.isDeal;
   const ownDipOk = sig.ownDrop != null && sig.ownDrop >= ownDropFactor;
   if (mode === 'strict') return sig.isDeal && ownDipOk && !sig.suspicious;
-  // balanced: a real dip under its own floor, OR a just-listed copy at a fresh new-low deal price.
-  return sig.isDeal && (ownDipOk || freshListing);
+  // balanced: a real MOVEMENT (own-dip OR just-listed) AND a TRUSTWORTHY discount. A copy priced like a
+  // worn (sub-VG+) copy — judged only against Discogs's often-inflated VG+ *suggestion* — is almost
+  // always a beat-up common, not a mispriced gem (real false positives: a €5.73 "Poor"-priced copy
+  // shown as "86% off" the €42 VG+ suggestion). So it stays OUT of the inbox unless the discount is
+  // confirmed against a REAL sold-median (true market value). Speculative worn-priced "steals" are left
+  // to the dashboard scan, which reads the actual per-copy condition; the proactive email stays precise.
+  const wornPriced = sig.suspicious || sig.pricedAsWorn;
+  const trustworthy = !wornPriced || sig.referenceSource === 'sold-median';
+  return sig.isDeal && (ownDipOk || freshListing) && trustworthy;
 }
 
 // ---------------------------------------------------------------------------
@@ -680,37 +687,45 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(dealValueScore({ effectiveDiscount: 0.5, discount: 0.7 }) === 0.5, 'effectiveDiscount (incl. shipping) is preferred over item-only discount');
   assert.strictEqual(dealValueScore(null), 0, 'null deal scores 0');
 
-  // --- shouldFire (warm-up + profiles) ---
-  // A genuine dip: cheap vs suggestion AND a big own-dip.
-  const dip = evaluateMarketSignal({ lowest: 5, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
-  assert.ok(!shouldFire(dip, 3, { mode: 'balanced' }), 'warm-up: 3 obs < warmupMin 4 -> no fire');
-  assert.ok(shouldFire(dip, 4, { mode: 'balanced' }), 'balanced: warmed + own-dip + cheap -> fire');
-
-  // A standing cheap copy: cheap vs suggestion but NO own-dip (price == its usual lowest).
-  const standing = evaluateMarketSignal({ lowest: 12, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
-  assert.ok(standing.meetsThreshold, 'standing copy is still under the 50% threshold');
-  assert.ok(!shouldFire(standing, 10, { mode: 'balanced' }), 'balanced: standing cheap copy does NOT fire (flood killer)');
-  assert.ok(shouldFire(standing, 10, { mode: 'sensitive' }), 'sensitive: standing cheap copy DOES fire');
-
-  // strict: the dip is "suspicious" (5 < VG suggestion 22) so strict rejects it.
-  assert.ok(!shouldFire(dip, 4, { mode: 'strict' }), 'strict: rejects suspiciously-low (likely sub-VG+) copy');
+  // --- shouldFire (warm-up + profiles + the trustworthy-discount gate) ---
+  // A genuine, TRUSTWORTHY dip: a big own-dip AND priced like a decent (>= VG) copy.
   const cleanDip = evaluateMarketSignal({ lowest: 25, suggestion: 60, suggestionLow: 22, trailingMedian: 50, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.ok(!cleanDip.suspicious, 'cleanDip is priced above the VG suggestion -> not worn-priced');
+  assert.ok(!shouldFire(cleanDip, 3, { mode: 'balanced' }), 'warm-up: 3 obs < warmupMin 4 -> no fire');
+  assert.ok(shouldFire(cleanDip, 4, { mode: 'balanced' }), 'balanced: warmed + own-dip + priced like VG+ -> fire');
   assert.ok(shouldFire(cleanDip, 4, { mode: 'strict' }), 'strict: accepts a dip priced above the VG suggestion');
 
-  // fresh-listing override: a just-listed cheap copy fires in balanced even without an own-dip.
-  // standingFresh: price == its usual lowest (no own-dip) but it's a new-low deal vs suggestion.
-  const standingFresh = evaluateMarketSignal({ lowest: 12, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
-  assert.ok(!shouldFire(standingFresh, 10, { mode: 'balanced' }), 'balanced: cheap copy with no own-dip does NOT fire when not fresh');
-  assert.ok(shouldFire(standingFresh, 10, { mode: 'balanced', freshListing: true }), 'balanced: a JUST-LISTED cheap new-low copy fires (the target event)');
-  assert.ok(!shouldFire(standingFresh, 10, { mode: 'strict', freshListing: true }), 'strict ignores the fresh-listing shortcut');
+  // A WORN-priced dip (the Doctor''s Cat / Aleem false positive): big own-dip + cheap vs the VG+
+  // SUGGESTION, but priced like a Poor copy (suspicious). Balanced must NOT email it (judged only
+  // against the inflated suggestion); strict rejects it too; only sensitive (everything) fires.
+  const wornDip = evaluateMarketSignal({ lowest: 5, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.ok(wornDip.suspicious && wornDip.isDeal, 'wornDip is a "deal" vs the suggestion but priced below VG (suspicious)');
+  assert.ok(!shouldFire(wornDip, 4, { mode: 'balanced' }), 'balanced: a worn-priced copy vs only the suggestion does NOT fire (the false-positive fix)');
+  assert.ok(!shouldFire(wornDip, 10, { mode: 'balanced', freshListing: true }), 'balanced: not even a JUST-LISTED worn-priced copy fires (the exact live false-positive case)');
+  assert.ok(!shouldFire(wornDip, 4, { mode: 'strict' }), 'strict: rejects suspiciously-low (likely sub-VG+) copy');
+  assert.ok(shouldFire(wornDip, 4, { mode: 'sensitive' }), 'sensitive: fires on anything cheap vs the reference (noisy by design)');
 
-  // fresh-listing gets the LIGHTER warm-up in balanced: a just-listed deal fires after 2 obs, while a
-  // non-fresh deal still needs the full warm-up (4). Catches diamonds on releases we've only just begun
-  // tracking — without re-opening the cold-start flood for ordinary standing-price observations.
-  assert.ok(shouldFire(dip, 2, { mode: 'balanced', freshListing: true }), 'balanced: a fresh-listing deal fires after the light warm-up (2 obs)');
-  assert.ok(!shouldFire(dip, 2, { mode: 'balanced' }), 'balanced: a non-fresh deal still needs the full warm-up (4)');
-  assert.ok(!shouldFire(dip, 1, { mode: 'balanced', freshListing: true }), 'even a fresh listing needs >=2 obs (a prior observation to have detected the rise)');
-  assert.ok(!shouldFire(dip, 2, { mode: 'strict', freshListing: true }), 'strict keeps the full warm-up even for a fresh listing');
+  // ...BUT a REAL sold-median rescues a worn-priced copy: if copies actually SOLD for ~40 and this one
+  // is 5, the record has confirmed value, so balanced fires (a real find worth a look).
+  const wornButRealMedian = evaluateMarketSignal({ lowest: 5, soldMedian: 40, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.strictEqual(wornButRealMedian.referenceSource, 'sold-median', 'real sold-median is the reference');
+  assert.ok(shouldFire(wornButRealMedian, 4, { mode: 'balanced', freshListing: true }), 'balanced: a worn-priced copy CONFIRMED far under a real sold-median fires');
+
+  // A standing copy priced like VG+ but with NO movement (no own-dip, not fresh) -> no fire.
+  const standing = evaluateMarketSignal({ lowest: 25, suggestion: 60, suggestionLow: 22, trailingMedian: 25, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.ok(standing.meetsThreshold && !standing.suspicious, 'standing copy is under threshold and priced like VG+');
+  assert.ok(!shouldFire(standing, 10, { mode: 'balanced' }), 'balanced: standing copy with no movement does NOT fire (flood killer)');
+  assert.ok(shouldFire(standing, 10, { mode: 'sensitive' }), 'sensitive: standing cheap copy DOES fire');
+
+  // fresh-listing shortcut: a JUST-LISTED, priced-like-VG+ copy fires in balanced even without an own-dip,
+  // and on the LIGHTER warm-up (2 obs). A non-fresh deal still needs the full warm-up (4). Strict ignores
+  // the shortcut (needs an own-dip) and keeps the full warm-up.
+  assert.ok(shouldFire(standing, 10, { mode: 'balanced', freshListing: true }), 'balanced: a JUST-LISTED priced-like-VG+ copy fires (the target event)');
+  assert.ok(shouldFire(standing, 2, { mode: 'balanced', freshListing: true }), 'balanced: a fresh-listing trustworthy deal fires after the light warm-up (2 obs)');
+  assert.ok(!shouldFire(standing, 2, { mode: 'balanced' }), 'balanced: a non-fresh deal still needs the full warm-up (4)');
+  assert.ok(!shouldFire(standing, 1, { mode: 'balanced', freshListing: true }), 'even a fresh listing needs >=2 obs (a prior observation to have detected the rise)');
+  assert.ok(!shouldFire(standing, 10, { mode: 'strict', freshListing: true }), 'strict ignores the fresh-listing shortcut (needs an own-dip)');
+  assert.ok(!shouldFire(standing, 2, { mode: 'strict', freshListing: true }), 'strict keeps the full warm-up even for a fresh listing');
 
   // --- isFreshListing ---
   assert.ok(isFreshListing({ numForSale: 3 }, { numForSale: 4 }), 'num_for_sale rose -> a copy was just listed');

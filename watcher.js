@@ -237,32 +237,34 @@ if (require.main === module && process.argv.includes('--itest')) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-itest-'));
     const store = makeStore(tmp);
 
-    // Balanced mode: VG+ suggestion 40, VG 22. A release that normally bottoms out at ~12,
-    // then a genuine €5 dip appears. Warm-up (4 obs) must suppress early alerts; the standing
-    // €12 copy must NOT fire (no own-dip); only the €5 dip fires, once.
-    let seq = [12, 11, 13, 12, 5, 5];
+    // Balanced mode: VG+ suggestion 40, VG 10. A release that normally bottoms out at ~25, then a
+    // genuine €12 dip appears that is priced like a VG copy (above the VG suggestion -> NOT worn/
+    // suspicious). Warm-up (4 obs) must suppress early alerts; the standing €25 copy must NOT fire
+    // (no own-dip); only the trustworthy €12 dip fires, once. (A worn-priced dip would be suppressed
+    // by the balanced trustworthy-discount gate — covered by engine.shouldFire's selftest.)
+    let seq = [25, 24, 26, 25, 12, 12];
     let k = 0;
     const client = {
       async getMarketplaceStats() { const v = seq[Math.min(k++, seq.length - 1)]; return { lowestPrice: v, numForSale: 10, currency: 'EUR' }; },
-      async getPriceSuggestions() { return { 'Very Good Plus (VG+)': { value: 40, currency: 'EUR' }, 'Very Good (VG)': { value: 22, currency: 'EUR' } }; },
+      async getPriceSuggestions() { return { 'Very Good Plus (VG+)': { value: 40, currency: 'EUR' }, 'Very Good (VG)': { value: 10, currency: 'EUR' } }; },
     };
     const config = { ...DEFAULTS, token: 'X', currency: 'EUR', minDiscount: 0.5, mode: 'balanced' };
     const rel = { releaseId: 555, title: 'Test', artist: 'Tester', year: 1984 };
     const deps = { client, store, engine, config };
 
-    // Obs 1-3 (12, 11, 13): under warmupMin=4 -> no alerts even though 12 vs 40 is "cheap".
+    // Obs 1-3 (25, 24, 26): under warmupMin=4 -> no alerts even though 25 vs 40 is "cheap".
     for (let i = 0; i < 3; i++) assert.strictEqual(await processRelease(rel, deps), null, 'warm-up suppresses early observations');
 
-    // Obs 4 (12): warmed up now, but 12 == its own usual lowest -> no own-dip -> NO fire (flood killer).
+    // Obs 4 (25): warmed up now, but 25 == its own usual lowest -> no own-dip -> NO fire (flood killer).
     assert.strictEqual(await processRelease(rel, deps), null, 'standing cheap copy does not fire in balanced mode');
 
-    // Obs 5 (5): a genuine dip ~58% under its own median AND >50% under VG+ suggestion -> FIRE.
+    // Obs 5 (12): a genuine dip ~52% under its own median, >50% under VG+ suggestion, priced like VG -> FIRE.
     const dip = await processRelease(rel, deps);
-    assert.ok(dip, 'genuine new-low dip fires');
+    assert.ok(dip, 'genuine new-low trustworthy dip fires');
     assert.ok(dip.ownDrop > 0.4, 'dip is well under its own usual lowest');
-    assert.ok(dip.suspicious, '5 is below VG suggestion 22 -> flagged suspicious (but balanced still fires)');
+    assert.ok(!dip.suspicious, '12 is above the VG suggestion 10 -> priced like a real copy, not worn/suspicious');
 
-    // Obs 6 (5): same price -> not a new low -> no re-alert.
+    // Obs 6 (12): same price -> not a new low -> no re-alert.
     assert.strictEqual(await processRelease(rel, deps), null, 'same dip price does not re-alert');
 
     assert.strictEqual(store.countDeals(), 1, 'exactly one deal recorded in balanced mode');
