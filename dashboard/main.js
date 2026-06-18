@@ -126,7 +126,6 @@ function loadWatcher() {
   }
 }
 
-const SOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sold-median changes slowly; cache a week
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DISCOGS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const parseMoney = (s) => { if (s == null) return null; const n = parseFloat(String(s).replace(/[^\d.]/g, '')); return Number.isFinite(n) ? n : null; };
@@ -146,19 +145,105 @@ const SOLD_EXTRACT = `(() => {
   };
 })()`;
 
-// Load a release page in a hidden (real Chromium, residential IP) window and read its REAL
-// sales-history median. The Cloudflare JS challenge runs and clears in this window; the
-// cf_clearance cookie persists across navigations so only the first load pays the wait.
-async function fetchSoldMedian(cfWin, releaseId) {
+// In-page fetch of the REAL per-copy marketplace listings. The modern Discogs marketplace is
+// backed by a clean JSON endpoint (/api/shop-page-api/sell_item) that returns each copy's exact
+// media + sleeve condition, price and shipping — the data the official API hides. We run this
+// fetch INSIDE the Cloudflare-cleared window (same-origin + cf_clearance cookie), so it succeeds
+// where a plain cloud/datacenter fetch would 403. Far more robust than scraping listing HTML.
+const LISTINGS_FETCH = (releaseId, currency) => `(async () => {
+  try {
+    const u = 'https://www.discogs.com/api/shop-page-api/sell_item?release=' + ${Number(releaseId)}
+      + '&sort=price&sortOrder=ascending&count=100&offset=0&currency=' + ${JSON.stringify(String(currency || 'EUR'))};
+    const res = await fetch(u, { headers: { Accept: 'application/json' }, credentials: 'include' });
+    if (!res.ok) return { error: 'http_' + res.status };
+    const ct = res.headers.get('content-type') || '';
+    if (!/json/i.test(ct)) return { error: 'not_json' }; // Cloudflare HTML challenge, not the API
+    const j = await res.json();
+    const items = (j.items || []).map((it) => ({
+      itemId: it.itemId || null,
+      media: it.mediaCondition || null,
+      sleeve: it.sleeveCondition || null,
+      price: it.price ? it.price.amount : null,
+      currency: it.price ? it.price.currencyCode : null,
+      shipping: (it.shipping && it.shipping.shippingPrice != null) ? it.shipping.shippingPrice : null,
+      shipsFrom: it.seller ? it.seller.shipsFrom : null,
+      sellerRating: it.seller ? it.seller.rating : null,
+      allowsOffers: !!it.allowsOffers,
+    }));
+    return { items: items, totalCount: (j.totalCount != null ? j.totalCount : items.length) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+})()`;
+
+// The same listings endpoint as a plain URL — for the FALLBACK strategy: navigate the window
+// straight to it and read the JSON body (the exact flow proven by the public Discogs scraper —
+// a direct GET of this URL returns JSON once cf_clearance is set). Robust if the in-page fetch is
+// ever blocked (e.g. a stricter CSP/referer check) while a top-level navigation still works.
+const SELL_ITEM_URL = (releaseId, currency) =>
+  `https://www.discogs.com/api/shop-page-api/sell_item?release=${Number(releaseId)}&sort=price&sortOrder=ascending&count=100&offset=0&currency=${encodeURIComponent(String(currency || 'EUR'))}`;
+
+// Read + parse the JSON body of the sell_item endpoint after navigating to it directly.
+const PARSE_BODY = `(() => {
+  try {
+    const t = document.body ? document.body.innerText : '';
+    if (/just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300))) return { error: 'cloudflare' };
+    const j = JSON.parse(t);
+    const items = (j.items || []).map((it) => ({
+      itemId: it.itemId || null,
+      media: it.mediaCondition || null,
+      sleeve: it.sleeveCondition || null,
+      price: it.price ? it.price.amount : null,
+      currency: it.price ? it.price.currencyCode : null,
+      shipping: (it.shipping && it.shipping.shippingPrice != null) ? it.shipping.shippingPrice : null,
+      shipsFrom: it.seller ? it.seller.shipsFrom : null,
+    }));
+    return { items: items, totalCount: (j.totalCount != null ? j.totalCount : items.length) };
+  } catch (e) { return { error: 'parse_' + String((e && e.message) || e) }; }
+})()`;
+
+// Load a release page in a hidden (real Chromium, residential IP) window, then read BOTH:
+//   (1) its REAL sales-history median (Last Sold / Low / Median / High, off the page text), and
+//   (2) its REAL per-copy marketplace listings (via the same-origin sell_item JSON fetch above).
+// The Cloudflare JS challenge runs and clears in this window; the cf_clearance cookie persists
+// across navigations so only the first load pays the wait.
+async function loadReleaseData(cfWin, releaseId, currency) {
   await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
-  let r = null;
+  let sold = null;
+  let cleared = false;
   for (let i = 0; i < 22; i++) {
     await sleep(1000);
-    r = await cfWin.webContents.executeJavaScript(SOLD_EXTRACT).catch(() => null);
-    if (r && !r.challenged && r.len > 1500) break;
+    const r = await cfWin.webContents.executeJavaScript(SOLD_EXTRACT).catch(() => null);
+    if (r && !r.challenged && r.len > 1500) {
+      cleared = true;
+      sold = { median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null, ts: Date.now() };
+      break;
+    }
   }
-  if (!r || r.challenged) return null; // Cloudflare never cleared for this one
-  return { median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null, ts: Date.now() };
+  if (!cleared) return { cleared: false, sold: null, listings: null, listingsError: 'cloudflare' };
+  // CF cleared -> the public marketplace JSON API is now reachable from this origin.
+  // Strategy 1: in-page fetch (no extra navigation; returns structured data directly).
+  let lr = null;
+  for (let i = 0; i < 5; i++) {
+    lr = await cfWin.webContents.executeJavaScript(LISTINGS_FETCH(releaseId, currency)).catch((e) => ({ error: String((e && e.message) || e) }));
+    if (lr && Array.isArray(lr.items)) break;
+    await sleep(800);
+  }
+  // Strategy 2 (fallback): navigate straight to the JSON URL and read the body (the scraper's flow).
+  if (!(lr && Array.isArray(lr.items))) {
+    await cfWin.loadURL(SELL_ITEM_URL(releaseId, currency), { userAgent: DISCOGS_UA, extraHeaders: 'Accept: application/json' }).catch(() => {});
+    for (let i = 0; i < 8; i++) {
+      await sleep(800);
+      const r = await cfWin.webContents.executeJavaScript(PARSE_BODY).catch(() => null);
+      if (r && Array.isArray(r.items)) { lr = r; break; }
+      if (r && r.error && r.error !== 'cloudflare') { lr = r; break; } // genuine parse error, stop retrying
+    }
+  }
+  return {
+    cleared: true,
+    sold,
+    listings: lr && Array.isArray(lr.items) ? lr.items : null,
+    listingsError: lr && lr.error ? lr.error : (lr && Array.isArray(lr.items) ? null : 'no_result'),
+    totalCount: lr ? lr.totalCount : null,
+  };
 }
 
 async function runScrape(win) {
@@ -213,47 +298,124 @@ async function runScrape(win) {
       if (checked % 2 === 0 || checked === total) send({ phase: 'scan', checked, total, found: candidates.length });
     }
 
-    // PHASE 2 (web, slower): for each candidate fetch the REAL sales-history median via a hidden
-    // BrowserWindow (residential IP clears Cloudflare), then re-judge against that true market value.
+    // PHASE 2 (web, slower): for each candidate open a hidden BrowserWindow (residential IP clears
+    // Cloudflare) and read the REAL data the official API hides — the sales-history median AND every
+    // copy's actual media condition + price + shipping. We then pick the CHEAPEST copy that is
+    // VG+ or better and judge the discount against THAT copy. A release whose only cheap copies are
+    // worn (sub-VG+) is dropped — so a scan deal is a copy we've CONFIRMED is VG+, not a price guess.
     cfWin = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { images: false } });
     const deals = [];
     let priced = 0;
+    let confirmed = 0;
+    let droppedNoVgPlus = 0;
+    let unconfirmed = 0;
+    const marketUrl = (id) => `${engine.releaseMarketUrl(id)}?sort=price%2Casc&limit=25&currency=${config.currency}`;
     for (const c of candidates) {
       if (scrapeAbort) break;
-      let sold = store.getSoldMedian(c.rel.releaseId);
-      if (!sold || Date.now() - sold.ts > SOLD_TTL_MS) {
-        try { const f = await fetchSoldMedian(cfWin, c.rel.releaseId); if (f) { sold = f; store.setSoldMedian(c.rel.releaseId, f); } } catch { /* leave sold null -> falls back to suggestion */ }
-        await sleep(800); // be gentle on Discogs/Cloudflare between page loads
-      }
-      const sig = engine.evaluateMarketSignal({
-        lowest: c.stats.lowestPrice,
-        soldMedian: sold ? sold.median : null,
-        suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
-        trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
-        prevAlertedLowest: null,
-      }, { minDiscount: 0.4 });
-      if (sig.meetsThreshold) {
-        deals.push({
-          id: `${c.rel.releaseId}-scan`,
-          releaseId: c.rel.releaseId, title: c.rel.title, artist: c.rel.artist, year: c.rel.year, thumb: c.rel.thumb,
-          lowest: c.stats.lowestPrice, currency: c.stats.currency || config.currency, numForSale: c.stats.numForSale,
-          reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
-          soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
-          impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn,
-          ownDrop: sig.ownDrop, confidence: sig.confidence, suspicious: sig.suspicious,
-          freshListing: c.freshListing,
-          url: `${engine.releaseMarketUrl(c.rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
-          releaseUrl: engine.releaseUrl(c.rel.releaseId), ts: Date.now(),
-        });
+      const cachedSold = store.getSoldMedian(c.rel.releaseId);
+
+      // One navigation gives us both the sold-median and the live per-copy listings.
+      let data = { cleared: false, sold: null, listings: null };
+      try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency); } catch { /* leave defaults */ }
+      await sleep(600); // be gentle on Discogs/Cloudflare between releases
+
+      // Sold-median: prefer a fresh scrape, else the weekly cache. Refresh the cache when fresh.
+      let sold = cachedSold;
+      if (data.sold && data.sold.median != null) { sold = data.sold; store.setSoldMedian(c.rel.releaseId, data.sold); }
+
+      const common = {
+        id: `${c.rel.releaseId}-scan`,
+        releaseId: c.rel.releaseId, title: c.rel.title, artist: c.rel.artist, year: c.rel.year, thumb: c.rel.thumb,
+        numForSale: c.stats.numForSale,
+        soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
+        freshListing: c.freshListing,
+        releaseUrl: engine.releaseUrl(c.rel.releaseId), ts: Date.now(),
+      };
+
+      if (Array.isArray(data.listings)) {
+        // We have the real listings -> pick the cheapest copy that is actually VG+ or better.
+        const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
+        if (!pick.best) { droppedNoVgPlus++; priced++; send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length }); continue; }
+        const best = pick.best;
+        const sig = engine.evaluateMarketSignal({
+          lowest: best.price,
+          soldMedian: sold ? sold.median : null,
+          suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
+          trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
+          prevAlertedLowest: null,
+        }, { minDiscount: 0.4, shippingEstimate: best.shipping != null ? best.shipping : config.shippingEstimate });
+        if (sig.meetsThreshold) {
+          const cur = best.currency || c.stats.currency || config.currency;
+          const cheaperWorn = pick.cheapestAny && pick.cheapestAny.itemId !== best.itemId
+            && (pick.cheapestAny.total ?? pick.cheapestAny.price) < (best.total ?? best.price);
+          // A: how many VG+ copies are ALL cheap vs the reference (a cluster = real price drop, not a fluke).
+          const cluster = engine.cheapCluster(pick.acceptable, sig.reference, 0.4);
+          // B: a slightly-dearer-but-better-grade copy to offer as an alternative.
+          const alt = pick.betterAlt;
+          deals.push({
+            ...common,
+            lowest: best.price, currency: cur,
+            shipping: best.shipping, shipsFrom: best.shipsFrom,
+            reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
+            conditionConfirmed: true, mediaCondition: best.media, sleeveCondition: best.sleeve,
+            vgPlusCount: pick.acceptableCount, copiesSeen: pick.totalCount,
+            cheapVgPlusCount: cluster.count, cheapVgPlusLow: cluster.low, cheapVgPlusHigh: cluster.high,
+            altGrade: alt ? alt.media : null, altPrice: alt ? (alt.total ?? alt.price) : null, altUrl: alt ? alt.url : null,
+            cheaperWornPrice: cheaperWorn ? pick.cheapestAny.price : null,
+            cheaperWornCondition: cheaperWorn ? pick.cheapestAny.media : null,
+            ownDrop: sig.ownDrop, impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn, suspicious: sig.suspicious,
+            listingUrl: best.url, url: best.url || marketUrl(c.rel.releaseId),
+          });
+          confirmed++;
+        }
+      } else {
+        // Listings unreachable (Cloudflare didn't clear / API shape changed) -> fall back to the
+        // API-only estimate so the feature degrades gracefully. Marked unconfirmed; the dashboard's
+        // "VG+ only" filter hides it unless it at least looks VG+ by price.
+        const sig = engine.evaluateMarketSignal({
+          lowest: c.stats.lowestPrice,
+          soldMedian: sold ? sold.median : null,
+          suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
+          trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
+          prevAlertedLowest: null,
+        }, { minDiscount: 0.4 });
+        if (sig.meetsThreshold) {
+          deals.push({
+            ...common,
+            lowest: c.stats.lowestPrice, currency: c.stats.currency || config.currency,
+            shipping: null,
+            reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
+            conditionConfirmed: false, conditionError: data.listingsError || 'unavailable',
+            ownDrop: sig.ownDrop, impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn, suspicious: sig.suspicious,
+            url: marketUrl(c.rel.releaseId),
+          });
+          unconfirmed++;
+        }
       }
       priced++;
-      send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length });
+      send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed });
     }
 
     deals.sort((a, b) => (b.discount ?? 0) - (a.discount ?? 0));
     try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals })); } catch { /* best effort */ }
-    send({ phase: 'done', checked: total, total, found: deals.length, aborted: scrapeAbort });
-    return { deals, checked: total, total, aborted: scrapeAbort };
+
+    // Export the accumulated REAL sales-history medians to a committable root file so the cloud email
+    // watcher can judge deals against true market value. The store keeps them in the gitignored
+    // state/soldmedians.json (which can't reach GitHub); soldmedians.json at the repo root can —
+    // commit + push it and watch-once.js seeds it on the next sweep. This is how a local scan makes
+    // the EMAILS smarter (its main job), beyond just showing results in the dashboard.
+    let soldMediansExported = 0;
+    try {
+      const src = path.join(WATCHER_DIR, 'state', 'soldmedians.json');
+      if (fs.existsSync(src)) {
+        const sm = JSON.parse(fs.readFileSync(src, 'utf8'));
+        soldMediansExported = sm && typeof sm === 'object' ? Object.keys(sm).length : 0;
+        if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(sm));
+      }
+    } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
+
+    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, soldMediansExported, aborted: scrapeAbort });
+    return { deals, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, aborted: scrapeAbort };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
