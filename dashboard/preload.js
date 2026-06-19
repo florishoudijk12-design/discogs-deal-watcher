@@ -7,8 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   getDeals: (limit) => ipcRenderer.invoke('deals:get', limit),
   getStatus: () => ipcRenderer.invoke('status:get'),
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
-  // Local "Scan now" full sweep.
-  scrapeRun: () => ipcRenderer.invoke('scrape:run'),
+  // Local scan: full sweep, or a prioritized quick scan ({ quick: true }).
+  scrapeRun: (opts) => ipcRenderer.invoke('scrape:run', opts),
   scrapeCancel: () => ipcRenderer.invoke('scrape:cancel'),
   scrapeLast: () => ipcRenderer.invoke('scrape:last'),
   onScrapeProgress: (cb) => {

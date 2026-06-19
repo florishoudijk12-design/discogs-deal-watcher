@@ -162,9 +162,16 @@ function card(d) {
   const thumb = d.thumb
     ? `<img class="thumb" src="${esc(d.thumb)}" alt="" referrerpolicy="no-referrer" />`
     : `<div class="thumb"></div>`;
+  // Shipping line. A scan-confirmed copy carries the REAL shipping Discogs charges to ship to us
+  // (shown plainly, no "est."); a cloud/unconfirmed deal has no per-copy shipping, so it falls back
+  // to the slider estimate — clearly marked "(est.)" so the two are never confused.
+  const itemTxt = `${money(d.lowest, d.currency)} item`;
   const shipNote = d._shipReal
-    ? (d._ship > 0 ? `${money(d.lowest, d.currency)} item + ${money(d._ship, d.currency)} shipping` : `${money(d.lowest, d.currency)} item · free shipping`)
-    : (d._ship > 0 ? `${money(d.lowest, d.currency)} item + ${money(d._ship, d.currency)} ship est.` : `${money(d.lowest, d.currency)} item · no shipping added`);
+    ? (d._ship > 0 ? `${itemTxt} + ${money(d._ship, d.currency)} shipping` : `${itemTxt} · free shipping`)
+    : (d._ship > 0 ? `${itemTxt} + ${money(d._ship, d.currency)} shipping (est.)` : `${itemTxt} · shipping unknown`);
+  const shipTitle = d._shipReal
+    ? (d.shippingSource === 'base' ? 'Real shipping (seller&#39;s flat rate, from the live listing)' : 'Real shipping to your location, from the live listing')
+    : 'Estimated shipping (slider) — this deal has no per-copy shipping; run ⚡ Scan now for the real amount';
   const save = d._savings != null ? ` · save ${money(d._savings, d.currency)}` : '';
   const forSale = d.vgPlusCount != null
     ? `${esc(String(d.vgPlusCount))} VG+ of ${esc(String(d.numForSale ?? '?'))} for sale`
@@ -190,7 +197,7 @@ function card(d) {
         <span class="discount">${pct(d._eff)} off</span>
         ${spark}
       </div>
-      <div class="subprice">${shipNote}</div>
+      <div class="subprice ${d._shipReal ? 'ship-real' : 'ship-est'}" title="${shipTitle}">${shipNote}</div>
       <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${d.soldLow != null && d.soldHigh != null ? ` (${money(d.soldLow, d.currency)}–${money(d.soldHigh, d.currency)})` : ''}${save} · ${forSale}</div>
       ${cluster}
       ${worn}
@@ -316,7 +323,7 @@ async function refresh() {
 
 // --- Local "Scan now" full sweep ---
 function fmtEta(remaining) {
-  const secs = Math.round(remaining * 1.1); // ~1.1s per release at the authenticated rate limit
+  const secs = Math.round(remaining * 1.05); // ~1.05s per release at the scan's tightened pacing (1050ms)
   if (secs < 60) return `~${secs}s left`;
   return `~${Math.ceil(secs / 60)} min left`;
 }
@@ -325,21 +332,22 @@ function setScanUI(on) {
   scanning = on;
   $('scanbar').classList.toggle('hidden', !on);
   $('btn-scan').disabled = on;
+  $('btn-quickscan').disabled = on;
   $('btn-scan').textContent = on ? '⏳ Scanning…' : '⚡ Scan now';
 }
 
-async function startScan() {
+async function startScan(opts = {}) {
   if (!hasApi) { alert('Local scan needs the desktop app (run it with npm start).'); return; }
   if (scanning) return;
   setScanUI(true);
   $('scan-fill').style.width = '0%';
-  $('scan-text').textContent = 'Fetching your wantlist…';
+  $('scan-text').textContent = opts.quick ? 'Ranking your wantlist for a quick scan…' : 'Fetching your wantlist…';
   try {
-    const res = await window.api.scrapeRun();
+    const res = await window.api.scrapeRun(opts);
     viewMode = 'scan';
     allDeals = (res && res.deals) || [];
     seenIds = new Set(allDeals.map((d) => d.id));
-    setStatus(true, { wantlistSize: res ? res.total : '—', dealsStored: allDeals.length });
+    setStatus(true, { wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—', dealsStored: allDeals.length });
     render();
   } catch (e) {
     $('empty').classList.remove('hidden');
@@ -384,13 +392,23 @@ function onScanProgress(m) {
       else if (m.mediansPush.ok) push = ' · medians already up to date';
       else push = ` · ⚠ medians push failed (${m.mediansPush.reason || 'git error'}) — commit manually`;
     }
-    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${dropped}${m.aborted ? ' (stopped early)' : ''}.${push}`;
+    const ship = m.realShip != null && m.found ? ` · ${m.realShip}/${m.found} with real shipping` : '';
+    const cov = m.quick ? ` · quick scan (top ${m.total} of ${m.wantlistTotal})` : '';
+    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}`;
     return;
   }
+  // 'scan' phase: the API sweep and the browser confirmation run concurrently now, so one message
+  // carries both — the bar tracks the sweep (the dominant timeline) and the text adds the live deal
+  // count plus, once the sweep is done, how many candidates are still being confirmed.
   const total = m.total || 1;
   const pctDone = Math.min(100, Math.round((m.checked / total) * 100));
   $('scan-fill').style.width = pctDone + '%';
-  $('scan-text').textContent = `Scanning ${m.checked}/${total} · ${m.found} found · ${fmtEta(total - m.checked)}`;
+  const found = m.found || 0;
+  const remaining = Math.max(0, (m.candidates || 0) - (m.processed || 0));
+  const tail = (m.checked >= total && remaining > 0)
+    ? ` · confirming last ${remaining}`
+    : ` · ${fmtEta(total - m.checked)}`;
+  $('scan-text').textContent = `Scanning ${m.checked}/${total} · ${found} deal${found === 1 ? '' : 's'}${tail}`;
 }
 
 // --- Settings modal ---
@@ -460,7 +478,8 @@ async function testConnection() {
 
 // --- wire up ---
 window.addEventListener('DOMContentLoaded', () => {
-  $('btn-scan').addEventListener('click', startScan);
+  $('btn-scan').addEventListener('click', () => startScan());
+  $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
   $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); });
   $('btn-settings').addEventListener('click', openSettings);

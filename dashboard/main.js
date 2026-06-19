@@ -143,6 +143,7 @@ async function getStatus() {
 let scrapeAbort = false;
 let scrapeRunning = false;
 const SUGGESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const QUICK_SCAN_SIZE = 250; // a quick scan checks only the top-N highest-priority releases (by watch-score)
 const LAST_SCAN_FILE = () => path.join(app.getPath('userData'), 'last-scan.json');
 
 function loadWatcher() {
@@ -179,6 +180,42 @@ const SOLD_EXTRACT = `(() => {
   };
 })()`;
 
+// Map one raw sell_item JSON copy to our trimmed shape. Defined ONCE and embedded into both the
+// in-page fetch and the fallback body-parse extractors below, so the two can never drift apart.
+//
+// Shipping from the JSON: a copy carries `shipping.shippingPrice` (seller base rate) and
+// `shipping.buyerShippingPrice` (what WE pay to ship to our location). We prefer the buyer price,
+// fall back to the base rate, and honour a single-item free-shipping threshold. **BUT, verified
+// live (June 2026): for an ANONYMOUS request the entire `shipping` object — and the buyer* price
+// fields — come back null** (Discogs only computes buyer shipping for a known/logged-in
+// destination). That's why every scanned copy used to show the €5 estimate. The REAL shipping is
+// instead joined on by itemId from the rendered marketplace page (see SHIP_EXTRACT below), which
+// DOES show IP-geolocated shipping to us anonymously. This mapping is kept (correct + free when a
+// session ever IS logged in), but in practice `shippingSource` here is null and the page provides
+// the number. `shippingSource`: 'buyer'|'base'|null (the page join later sets 'page').
+const MAP_SELL_ITEM = `(it) => {
+  const sh = it.shipping || {};
+  const p = it.price || {};
+  const amount = (p.amount != null) ? p.amount : null;
+  let shipping = (sh.buyerShippingPrice != null) ? sh.buyerShippingPrice
+    : ((sh.shippingPrice != null) ? sh.shippingPrice : null);
+  const shippingSource = (sh.buyerShippingPrice != null) ? 'buyer'
+    : ((sh.shippingPrice != null) ? 'base' : null);
+  if (shipping != null && sh.freeShippingMin != null && amount != null && amount >= sh.freeShippingMin) shipping = 0;
+  return {
+    itemId: it.itemId || null,
+    media: it.mediaCondition || null,
+    sleeve: it.sleeveCondition || null,
+    price: amount,
+    currency: p.currencyCode || null,
+    shipping: shipping,
+    shippingSource: shippingSource,
+    shipsFrom: it.seller ? it.seller.shipsFrom : null,
+    sellerRating: it.seller ? it.seller.rating : null,
+    allowsOffers: !!it.allowsOffers,
+  };
+}`;
+
 // In-page fetch of the REAL per-copy marketplace listings. The modern Discogs marketplace is
 // backed by a clean JSON endpoint (/api/shop-page-api/sell_item) that returns each copy's exact
 // media + sleeve condition, price and shipping — the data the official API hides. We run this
@@ -193,17 +230,7 @@ const LISTINGS_FETCH = (releaseId, currency) => `(async () => {
     const ct = res.headers.get('content-type') || '';
     if (!/json/i.test(ct)) return { error: 'not_json' }; // Cloudflare HTML challenge, not the API
     const j = await res.json();
-    const items = (j.items || []).map((it) => ({
-      itemId: it.itemId || null,
-      media: it.mediaCondition || null,
-      sleeve: it.sleeveCondition || null,
-      price: it.price ? it.price.amount : null,
-      currency: it.price ? it.price.currencyCode : null,
-      shipping: (it.shipping && it.shipping.shippingPrice != null) ? it.shipping.shippingPrice : null,
-      shipsFrom: it.seller ? it.seller.shipsFrom : null,
-      sellerRating: it.seller ? it.seller.rating : null,
-      allowsOffers: !!it.allowsOffers,
-    }));
+    const items = (j.items || []).map(${MAP_SELL_ITEM});
     return { items: items, totalCount: (j.totalCount != null ? j.totalCount : items.length) };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 })()`;
@@ -221,66 +248,131 @@ const PARSE_BODY = `(() => {
     const t = document.body ? document.body.innerText : '';
     if (/just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300))) return { error: 'cloudflare' };
     const j = JSON.parse(t);
-    const items = (j.items || []).map((it) => ({
-      itemId: it.itemId || null,
-      media: it.mediaCondition || null,
-      sleeve: it.sleeveCondition || null,
-      price: it.price ? it.price.amount : null,
-      currency: it.price ? it.price.currencyCode : null,
-      shipping: (it.shipping && it.shipping.shippingPrice != null) ? it.shipping.shippingPrice : null,
-      shipsFrom: it.seller ? it.seller.shipsFrom : null,
-    }));
+    const items = (j.items || []).map(${MAP_SELL_ITEM});
     return { items: items, totalCount: (j.totalCount != null ? j.totalCount : items.length) };
   } catch (e) { return { error: 'parse_' + String((e && e.message) || e) }; }
 })()`;
 
-// Load a release page in a hidden (real Chromium, residential IP) window, then read BOTH:
-//   (1) its REAL sales-history median (Last Sold / Low / Median / High, off the page text), and
-//   (2) its REAL per-copy marketplace listings (via the same-origin sell_item JSON fetch above).
-// The Cloudflare JS challenge runs and clears in this window; the cf_clearance cookie persists
-// across navigations so only the first load pays the wait.
-async function loadReleaseData(cfWin, releaseId, currency) {
-  await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
+// The classic marketplace page (/sell/release/{id}) for the REAL per-copy shipping. The sell_item
+// JSON returns a null shipping object for anonymous requests, but this rendered page DOES show
+// shipping — geolocated to our (NL residential) IP — in every listing row (verified live: rows
+// like "+€20.00 shipping"). Each row links to /sell/item/{itemId}, so we scrape { itemId: shipping }
+// and join it onto the JSON copies by itemId. Selectors used (`tr.shortcut_navigable`, `.item_shipping`,
+// `a[href*="/sell/item/"]`) are the long-stable classic-marketplace markup. Returns 0 for free
+// shipping and omits rows with no parseable number (those keep null → estimate fallback, honestly).
+const SELL_PAGE_URL = (releaseId, currency) =>
+  `https://www.discogs.com/sell/release/${Number(releaseId)}?currency=${encodeURIComponent(String(currency || 'EUR'))}&sort=price%2Casc&limit=100`;
+const SHIP_EXTRACT = `(() => {
+  const rows = [...document.querySelectorAll('tr.shortcut_navigable')];
+  const map = {};
+  for (const tr of rows) {
+    const link = tr.querySelector('a[href*="/sell/item/"]');
+    const idm = link ? (link.getAttribute('href').match(/\\/sell\\/item\\/(\\d+)/) || [])[1] : null;
+    if (!idm) continue;
+    const shipEl = tr.querySelector('.item_shipping');
+    let ship = null;
+    if (shipEl) {
+      const t = shipEl.textContent.trim();
+      if (/free/i.test(t)) ship = 0;
+      else { const m = t.replace(/,/g, '.').match(/(\\d+(?:\\.\\d+)?)/); if (m) ship = parseFloat(m[1]); }
+    }
+    if (ship != null && isFinite(ship)) map[idm] = ship;
+  }
+  // The ready flag lets the poller stop as soon as the sell page has rendered (Cloudflare cleared),
+  // even for a release with zero current listings (rowCount 0) -- otherwise it would spin the
+  // full retry budget waiting for rows that will never appear.
+  const t = document.body ? document.body.innerText : '';
+  const challenged = /just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300));
+  return { map: map, rowCount: rows.length, ready: !challenged && t.length > 1200 };
+})()`;
+
+// Poll an in-page check, FAST-FIRST then backing off, instead of paying a fixed leading sleep.
+// Returns the first result for which ok(result) is true, or null after the retry budget. Once
+// cf_clearance is warm a page is ready almost immediately, so the first (zero-delay) check usually
+// wins — that's where the per-candidate seconds come from vs the old `sleep(1000); check` loops.
+// All waiting is local DOM polling (executeJavaScript), so it adds no network load on Discogs.
+async function waitFor(cfWin, script, ok, { tries = 20, step = 400, max = 1500 } = {}) {
+  let delay = 0;
+  for (let i = 0; i < tries; i++) {
+    if (scrapeAbort) return null;
+    if (delay) await sleep(delay);
+    const r = await cfWin.webContents.executeJavaScript(script).catch(() => null);
+    if (ok(r)) return r;
+    delay = Math.min(max, delay + step); // 0, 400, 800, 1200, 1500, 1500, ...
+  }
+  return null;
+}
+
+// Read a release's REAL data from a hidden (real Chromium, residential IP) window:
+//   (1) its sales-history median (Last Sold / Low / Median / High) — ONLY when we need it, and
+//   (2) its per-copy marketplace listings (condition/price via the same-origin sell_item JSON)
+//       joined with REAL per-copy shipping (scraped from the rendered sell page).
+// The Cloudflare JS challenge clears in this window; the cf_clearance cookie persists across
+// navigations (and across candidates in one scan), so only the first load pays the wait.
+//
+// opts.needSold === false skips the release-page navigation entirely. The sold-median moves slowly
+// (it's sales HISTORY) and is cached weekly, so on a repeat scan we already have it — skipping that
+// whole navigation is the single biggest per-candidate saving (and one fewer hit on Discogs). The
+// sell page is same-origin for the JSON fetch AND carries the shipping rows, so condition + price +
+// shipping all come from ONE navigation; the release page is loaded only on a sold-median cache miss.
+async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
+  const needSold = opts.needSold !== false;
   let sold = null;
   let cleared = false;
-  for (let i = 0; i < 22; i++) {
-    await sleep(1000);
-    const r = await cfWin.webContents.executeJavaScript(SOLD_EXTRACT).catch(() => null);
-    if (r && !r.challenged && r.len > 1500) {
+
+  if (needSold) {
+    await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
+    const r = await waitFor(cfWin, SOLD_EXTRACT, (x) => x && !x.challenged && x.len > 1500);
+    if (r) {
       cleared = true;
       sold = { median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null, ts: Date.now() };
-      break;
     }
   }
-  if (!cleared) return { cleared: false, sold: null, listings: null, listingsError: 'cloudflare' };
-  // CF cleared -> the public marketplace JSON API is now reachable from this origin.
-  // Strategy 1: in-page fetch (no extra navigation; returns structured data directly).
+
+  // Sell page: real per-copy shipping (DOM rows) AND, same-origin, the structured listings JSON.
+  await cfWin.loadURL(SELL_PAGE_URL(releaseId, currency), { userAgent: DISCOGS_UA }).catch(() => {});
+  const shipRes = await waitFor(cfWin, SHIP_EXTRACT, (x) => x && (x.rowCount > 0 || x.ready));
+  if (shipRes) cleared = true; // the sell page cleared CF even if the release page wasn't loaded/cleared
+  const shipMap = shipRes ? (shipRes.map || {}) : null;
+
+  // Per-copy condition + price via the same-origin JSON fetch (robust structured data, no selectors).
+  // Strategy 1: in-page fetch on the sell page we're already on.
   let lr = null;
   for (let i = 0; i < 5; i++) {
+    if (scrapeAbort) break;
     lr = await cfWin.webContents.executeJavaScript(LISTINGS_FETCH(releaseId, currency)).catch((e) => ({ error: String((e && e.message) || e) }));
     if (lr && Array.isArray(lr.items)) break;
-    await sleep(800);
+    await sleep(500);
   }
   // Strategy 2 (fallback): navigate straight to the JSON URL and read the body (the scraper's flow).
   if (!(lr && Array.isArray(lr.items))) {
     await cfWin.loadURL(SELL_ITEM_URL(releaseId, currency), { userAgent: DISCOGS_UA, extraHeaders: 'Accept: application/json' }).catch(() => {});
-    for (let i = 0; i < 8; i++) {
-      await sleep(800);
-      const r = await cfWin.webContents.executeJavaScript(PARSE_BODY).catch(() => null);
-      if (r && Array.isArray(r.items)) { lr = r; break; }
-      if (r && r.error && r.error !== 'cloudflare') { lr = r; break; } // genuine parse error, stop retrying
+    const r = await waitFor(cfWin, PARSE_BODY, (x) => x && (Array.isArray(x.items) || (x.error && x.error !== 'cloudflare')), { tries: 8, step: 500 });
+    if (r) lr = r;
+  }
+
+  // Join the REAL per-copy shipping onto the JSON copies by itemId. The JSON's shipping is null
+  // anonymously; the rendered sell page shows IP-geolocated shipping to us. Best-effort: any miss
+  // leaves shipping null → the dashboard's estimate fallback kicks in.
+  let shippingJoined = 0;
+  if (lr && Array.isArray(lr.items) && lr.items.length && shipMap) {
+    for (const it of lr.items) {
+      const k = it.itemId != null ? String(it.itemId) : null;
+      if (it.shipping == null && k && shipMap[k] != null) { it.shipping = shipMap[k]; it.shippingSource = 'page'; shippingJoined++; }
     }
   }
+
   return {
-    cleared: true,
+    cleared,
     sold,
     listings: lr && Array.isArray(lr.items) ? lr.items : null,
     listingsError: lr && lr.error ? lr.error : (lr && Array.isArray(lr.items) ? null : 'no_result'),
     totalCount: lr ? lr.totalCount : null,
+    shippingJoined,
   };
 }
 
-async function runScrape(win) {
+async function runScrape(win, opts = {}) {
   if (scrapeRunning) throw new Error('A scan is already running.');
   scrapeRunning = true;
   scrapeAbort = false;
@@ -293,65 +385,60 @@ async function runScrape(win) {
     if (!config.username) throw new Error('No Discogs username in config.json.');
 
     const store = makeStore(path.join(WATCHER_DIR, 'state'));
-    const client = makeClient({ token: config.token, userAgent: config.userAgent });
+    // Slightly tighter pacing than the cloud default (1100ms) for this interactive scan: 1050ms is
+    // ~57 req/min — under Discogs' 60/min cap AND clear of the client's near-empty-window guard (which
+    // would 60s-stall if `remaining` hit 1), so it shaves ~30-40s off a full sweep without risking a
+    // rate-limit stall. The cloud watcher keeps the conservative 1100ms default — its email
+    // reliability matters more there than a few seconds.
+    const client = makeClient({ token: config.token, userAgent: config.userAgent, minIntervalMs: 1050 });
+    const SOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sold-median changes slowly; reuse the weekly cache
 
     send({ phase: 'wantlist', checked: 0, total: 0, found: 0 });
     const wantlist = await client.getWantlist(config.username);
-    const total = wantlist.length;
+    const wantlistTotal = wantlist.length;
 
-    // PHASE 1 (API, fast): find candidates that look cheap vs the VG+ suggestion. This bounds the
-    // slow web phase to a shortlist instead of scraping all ~715 release pages.
-    const candidates = [];
-    let checked = 0;
-    for (const rel of wantlist) {
-      if (scrapeAbort) break;
-      try {
-        const stats = await client.getMarketplaceStats(rel.releaseId, config.currency);
-        const prevObs = store.lastObservation(rel.releaseId);
-        const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
-        store.pushObservation(rel.releaseId, curObs);
+    // Quick scan: check only the highest-PRIORITY releases — ranked by engine.releaseWatchScore
+    // (staleness + recent activity + rarity), the same signal the cloud sweep uses — instead of the
+    // whole wantlist. This is the only way under the ~13-min API rate-limit floor: it trades coverage
+    // (quiet/low-priority releases are skipped THIS run and roll into the next) for a ~4-5 min scan.
+    // A full scan (opts.quick falsy) still checks every release.
+    const now = Date.now();
+    const work = opts.quick
+      ? wantlist
+        .map((rel) => ({ rel, score: engine.releaseWatchScore(store.getHistory(rel.releaseId), now) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, QUICK_SCAN_SIZE)
+        .map((x) => x.rel)
+      : wantlist;
+    const total = work.length;
 
-        if (stats.numForSale > 0 && stats.lowestPrice != null) {
-          let sug = store.getSuggestion(rel.releaseId);
-          if (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
-            try {
-              const raw = await client.getPriceSuggestions(rel.releaseId);
-              if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) }; store.setSuggestion(rel.releaseId, sug); }
-            } catch { /* no suggestion -> trailing-median fallback */ }
-          }
-          const prelim = engine.evaluateMarketSignal({
-            lowest: stats.lowestPrice,
-            suggestion: sug ? sug.vgplus : null, suggestionLow: sug ? sug.vg : null, ladder: sug ? sug.ladder : null,
-            trailingMedian: store.trailingMedianLowest(rel.releaseId, config.trailingN),
-            prevAlertedLowest: null,
-          }, { minDiscount: 0.4 });
-          if (prelim.meetsThreshold) candidates.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs) });
-        }
-      } catch (e) { /* one release failing must not abort the scan */ }
-      checked++;
-      if (checked % 2 === 0 || checked === total) send({ phase: 'scan', checked, total, found: candidates.length });
-    }
-
-    // PHASE 2 (web, slower): for each candidate open a hidden BrowserWindow (residential IP clears
-    // Cloudflare) and read the REAL data the official API hides — the sales-history median AND every
-    // copy's actual media condition + price + shipping. We then pick the CHEAPEST copy that is
-    // VG+ or better and judge the discount against THAT copy. A release whose only cheap copies are
-    // worn (sub-VG+) is dropped — so a scan deal is a copy we've CONFIRMED is VG+, not a price guess.
+    // Create the hidden Cloudflare-clearing window NOW and pre-warm it in the background, so the
+    // cf_clearance cookie is already set by the time the first candidate needs it (the wait overlaps
+    // the early API calls instead of stalling the first confirmation).
     cfWin = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { images: false } });
+    cfWin.loadURL('https://www.discogs.com/', { userAgent: DISCOGS_UA }).catch(() => {});
+
     const deals = [];
-    let priced = 0;
+    let priced = 0;          // candidates run through the browser (Phase 2)
+    let candidateCount = 0;  // candidates discovered so far (Phase 1)
     let confirmed = 0;
     let droppedNoVgPlus = 0;
     let unconfirmed = 0;
+    let realShip = 0; // confirmed deals carrying REAL per-copy shipping (joined from the page, not estimated)
     const marketUrl = (id) => `${engine.releaseMarketUrl(id)}?sort=price%2Casc&limit=25&currency=${config.currency}`;
-    for (const c of candidates) {
-      if (scrapeAbort) break;
-      const cachedSold = store.getSoldMedian(c.rel.releaseId);
 
-      // One navigation gives us both the sold-median and the live per-copy listings.
+    // Confirm ONE candidate through the browser: read the REAL data the official API hides — the
+    // sales-history median (only when not cached) AND every copy's actual media condition + price +
+    // shipping — then pick the CHEAPEST copy that is VG+ or better and judge the discount against
+    // THAT copy. A release whose only cheap copies are worn (sub-VG+) is dropped, so a scan deal is a
+    // copy we've CONFIRMED is VG+, not a price guess.
+    async function confirmCandidate(c) {
+      const cachedSold = store.getSoldMedian(c.rel.releaseId);
+      const soldFresh = !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS));
+
       let data = { cleared: false, sold: null, listings: null };
-      try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency); } catch { /* leave defaults */ }
-      await sleep(600); // be gentle on Discogs/Cloudflare between releases
+      try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency, { needSold: !soldFresh }); } catch { /* leave defaults */ }
+      await sleep(300); // be gentle on Discogs/Cloudflare between releases
 
       // Sold-median: prefer a fresh scrape, else the weekly cache. Refresh the cache when fresh.
       let sold = cachedSold;
@@ -371,7 +458,7 @@ async function runScrape(win) {
       if (Array.isArray(data.listings)) {
         // We have the real listings -> pick the cheapest copy that is actually VG+ or better.
         const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
-        if (!pick.best) { droppedNoVgPlus++; priced++; send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length }); continue; }
+        if (!pick.best) { droppedNoVgPlus++; return; }
         const best = pick.best;
         const sig = engine.evaluateMarketSignal({
           lowest: best.price,
@@ -391,7 +478,7 @@ async function runScrape(win) {
           deals.push({
             ...common,
             lowest: best.price, currency: cur,
-            shipping: best.shipping, shipsFrom: best.shipsFrom,
+            shipping: best.shipping, shippingSource: best.shippingSource, shipsFrom: best.shipsFrom,
             reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
             conditionConfirmed: true, mediaCondition: best.media, sleeveCondition: best.sleeve,
             vgPlusCount: pick.acceptableCount, copiesSeen: pick.totalCount,
@@ -403,6 +490,7 @@ async function runScrape(win) {
             listingUrl: best.url, url: best.url || marketUrl(c.rel.releaseId),
           });
           confirmed++;
+          if (best.shipping != null) realShip++;
         }
       } else {
         // Listings unreachable (Cloudflare didn't clear / API shape changed) -> fall back to the
@@ -428,9 +516,69 @@ async function runScrape(win) {
           unconfirmed++;
         }
       }
-      priced++;
-      send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed });
     }
+
+    // PIPELINE: the API sweep (Phase 1, hits api.discogs.com) and the browser confirmation (Phase 2,
+    // hits www.discogs.com) use independent rate limits, so run them CONCURRENTLY instead of one after
+    // the other — the browser work fills the time the API pacing would otherwise spend idle. A single
+    // producer enqueues candidates as it finds them; a single consumer drains them through the one
+    // Cloudflare-cleared window. Total wall-clock collapses to ≈ the API sweep alone.
+    const queue = [];
+    let producerDone = false;
+    let wake = null; // resolver to wake the consumer when a candidate arrives or the producer finishes
+    let scanned = 0; // releases stats-checked (Phase 1 progress)
+    const progress = () => send({ phase: 'scan', checked: scanned, total, found: deals.length, candidates: candidateCount, processed: priced, queued: queue.length });
+
+    const consumer = (async () => {
+      for (;;) {
+        if (scrapeAbort) break;
+        if (!queue.length) {
+          if (producerDone) break;
+          await new Promise((r) => { wake = r; }); // sleep until a candidate is enqueued (or producer ends)
+          continue;
+        }
+        const c = queue.shift();
+        try { await confirmCandidate(c); } catch { /* one candidate failing must not stop the drain */ }
+        priced++;
+        progress();
+      }
+    })();
+
+    for (const rel of work) {
+      if (scrapeAbort) break;
+      try {
+        const stats = await client.getMarketplaceStats(rel.releaseId, config.currency);
+        const prevObs = store.lastObservation(rel.releaseId);
+        const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
+        store.pushObservation(rel.releaseId, curObs);
+
+        if (stats.numForSale > 0 && stats.lowestPrice != null) {
+          let sug = store.getSuggestion(rel.releaseId);
+          if (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
+            try {
+              const raw = await client.getPriceSuggestions(rel.releaseId);
+              if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) }; store.setSuggestion(rel.releaseId, sug); }
+            } catch { /* no suggestion -> trailing-median fallback */ }
+          }
+          const prelim = engine.evaluateMarketSignal({
+            lowest: stats.lowestPrice,
+            suggestion: sug ? sug.vgplus : null, suggestionLow: sug ? sug.vg : null, ladder: sug ? sug.ladder : null,
+            trailingMedian: store.trailingMedianLowest(rel.releaseId, config.trailingN),
+            prevAlertedLowest: null,
+          }, { minDiscount: 0.4 });
+          if (prelim.meetsThreshold) {
+            queue.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs) });
+            candidateCount++;
+            if (wake) { wake(); wake = null; } // wake the consumer if it was idle
+          }
+        }
+      } catch (e) { /* one release failing must not abort the scan */ }
+      scanned++;
+      if (scanned % 2 === 0 || scanned === total) progress();
+    }
+    producerDone = true;
+    if (wake) { wake(); wake = null; } // let the consumer finish draining the queue
+    await consumer;
 
     deals.sort((a, b) => (b.discount ?? 0) - (a.discount ?? 0));
     try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals })); } catch { /* best effort */ }
@@ -457,8 +605,8 @@ async function runScrape(win) {
       mediansPush = await autoPushSoldMedians();
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, soldMediansExported, mediansPush, aborted: scrapeAbort });
-    return { deals, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, aborted: scrapeAbort };
+    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal });
+    return { deals, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
@@ -474,7 +622,7 @@ ipcMain.handle('settings:set', (_e, s) => { writeSettings(s); return true; });
 ipcMain.handle('deals:get', (_e, limit) => getDeals(limit));
 ipcMain.handle('status:get', () => getStatus());
 ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
-ipcMain.handle('scrape:run', (e) => runScrape(BrowserWindow.fromWebContents(e.sender)));
+ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContents(e.sender), opts || {}));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });
 ipcMain.handle('scrape:last', () => lastScan());
 
