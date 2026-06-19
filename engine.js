@@ -189,10 +189,10 @@ function pricedAsWorn(lowest, ladder) {
  * absolute-cheapest copy (which on vinyl is very often a worn Good/VG copy). Ordering is by TOTAL
  * (price + shipping) so a cheap-item/expensive-shipping copy doesn't masquerade as the best buy.
  *
- *   listings: [{ price, shipping?, media, sleeve?, url?, itemId?, shipsFrom? }]
+ *   listings: [{ price, shipping?, shippingSource?, media, sleeve?, url?, itemId?, shipsFrom? }]
  *   opts.minCondition  default 'Very Good Plus (VG+)'
  * returns {
- *   best,            // cheapest copy meeting the bar, or null  { price, shipping, total, media, mediaRank, sleeve, url, itemId, shipsFrom }
+ *   best,            // cheapest copy meeting the bar, or null  { price, shipping, shippingSource, total, media, mediaRank, sleeve, url, itemId, shipsFrom }
  *   cheapestAny,     // the absolute cheapest copy of any grade, or null (for "a worn copy is cheaper" context)
  *   acceptableCount, // how many copies meet the condition bar
  *   totalCount,      // copies with a usable price
@@ -211,6 +211,7 @@ function selectByCondition(listings, opts = {}) {
       return {
         price,
         shipping,
+        shippingSource: l.shippingSource || null, // 'buyer' | 'base' | null — provenance of the shipping number
         total: price == null ? null : price + (shipping == null ? 0 : shipping),
         media: l.media || null,
         mediaRank,
