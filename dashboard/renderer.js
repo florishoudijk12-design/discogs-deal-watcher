@@ -559,13 +559,13 @@ function toggleSrc() {
 }
 
 async function openSettings() {
-  const s = hasApi ? await window.api.getSettings() : { sourceType: 'github', githubRepo: 'norsnors/discogs-deal-watcher', githubToken: '', apiBase: '', token: '', autoScanOnLaunchHours: 24 };
+  const s = hasApi ? await window.api.getSettings() : { sourceType: 'github', githubRepo: 'norsnors/discogs-deal-watcher', githubToken: '', apiBase: '', token: '', autoScanOnLaunchHours: 1 };
   $('set-sourceType').value = s.sourceType || 'github';
   $('set-apiBase').value = s.apiBase || '';
   $('set-token').value = s.token || '';
   $('set-githubRepo').value = s.githubRepo || '';
   $('set-githubToken').value = s.githubToken || '';
-  $('set-autoScan').value = String(s.autoScanOnLaunchHours ?? 24);
+  $('set-autoScan').value = String(s.autoScanOnLaunchHours ?? 1);
   toggleSrc();
   $('set-test').textContent = '';
   $('set-test').className = 'test-result';
@@ -654,6 +654,6 @@ window.addEventListener('DOMContentLoaded', () => {
     // req/hr stays well under the 60/hr unauthenticated limit.
     setInterval(refreshHealth, 120_000);
     maybeAutoScan();              // auto-scan on launch if the last scan is stale (keeps emails sharp)
-    setInterval(maybeAutoScan, 60 * 60_000); // re-check hourly while the app stays open
+    setInterval(maybeAutoScan, 15 * 60_000); // re-check every 15 min so the configured cadence (e.g. hourly) is actually honored while the app stays open
   }
 });

@@ -33,7 +33,7 @@ const DEFAULT_SETTINGS = {
   apiBase: 'http://localhost:8787',
   token: '',
   autoPushMedians: true, // after a scan, auto commit+push soldmedians.json so the cloud emails use it
-  autoScanOnLaunchHours: 24, // auto-run a local scan on launch if the last one is older than this (0 = off)
+  autoScanOnLaunchHours: 1, // keep a fresh scan while the app is open: re-scan whenever the last one is older than this many hours (also gates the launch scan). 0 = off
 };
 
 function readSettings() {
