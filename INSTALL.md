@@ -9,6 +9,8 @@ anything.
 
 ## 1. Install
 
+### Windows
+
 1. Download **`Discogs-Deal-Watcher-Setup-<version>.exe`**.
 2. Double-click it and follow the installer (you can choose the install folder). It creates a
    Start-menu and desktop shortcut, and an uninstaller.
@@ -20,6 +22,19 @@ anything.
 The app keeps your settings and scan cache in your per-user app-data folder
 (`%APPDATA%\Discogs Deal Watcher`), not in the install folder — so it survives upgrades and never
 needs admin rights to run.
+
+### macOS (universal — Apple Silicon + Intel)
+
+1. Download **`Discogs-Deal-Watcher-<version>-mac.dmg`**, open it, and drag the app into
+   **Applications**.
+2. The app isn't signed with a paid Apple Developer certificate, so the first launch needs one
+   manual unlock:
+   - **Right-click the app → Open → Open** (don't double-click the first time — macOS blocks
+     unsigned apps opened that way).
+   - If macOS still reports it as *"damaged"* or *"can't be opened"* (common on Apple Silicon), open
+     **Terminal** and run `xattr -cr "/Applications/Discogs Deal Watcher.app"`, then open it normally.
+
+Settings and the scan cache live in `~/Library/Application Support/Discogs Deal Watcher`.
 
 ---
 
