@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   scrapeRun: (opts) => ipcRenderer.invoke('scrape:run', opts),
   scrapeCancel: () => ipcRenderer.invoke('scrape:cancel'),
   scrapeLast: () => ipcRenderer.invoke('scrape:last'),
+  // Sold-medians git push: last persisted outcome (null = badge hidden) + a manual retry.
+  getPushStatus: () => ipcRenderer.invoke('medians:pushStatus'),
+  retryPush: () => ipcRenderer.invoke('medians:retryPush'),
   onScrapeProgress: (cb) => {
     const h = (_e, m) => cb(m);
     ipcRenderer.on('scrape:progress', h);

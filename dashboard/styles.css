@@ -46,6 +46,13 @@ body {
   padding: 4px 10px; border-radius: 999px; white-space: nowrap;
 }
 
+/* Sold-medians push badge: persists the outcome of the auto git-push that feeds the cloud emails.
+   Green = synced; red = the push FAILED (stays until a push succeeds; click retries in place). */
+.pill.push { font: inherit; font-size: 12px; cursor: default; }
+.pill.push.ok { color: var(--green); border-color: #1f5135; }
+.pill.push.bad { color: var(--red); border-color: #5b2b2b; cursor: pointer; font-weight: 600; }
+.pill.push.bad:hover { background: #1c1216; }
+
 /* Live-service badge: the heartbeat of the cloud watcher. A colored, gently breathing dot tells you
    at a glance whether the email/sweep service is actually running. Click-through opens the source
    (GitHub Actions run / server). State classes: live | delayed | fail | down | scan | idle. */

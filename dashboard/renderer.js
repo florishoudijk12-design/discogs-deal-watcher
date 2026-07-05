@@ -240,12 +240,19 @@ function nearMissReason(d) {
     const seen = d.copiesSeen ? ` ${d.copiesSeen} copies for sale, none VG+.` : '';
     return `No VG+ copy for sale — cheapest is ${cheap}${g}, below VG+.${seen}`;
   }
+  // How far under the 40% bar was it? "2% short" is worth a look; "30% short" isn't — surfacing the
+  // gap makes the near-miss list scannable (it's already sorted closest-first within each reason).
+  const gapTxt = (eff) => {
+    if (eff == null) return '';
+    const gap = Math.round((0.4 - eff) * 100);
+    return gap <= 0 ? '' : (gap <= 5 ? ` <b>Only ${gap}% short of the bar.</b>` : ` ${gap}% short of the bar.`);
+  };
   if (d.reasonCode === 'vgplus-not-cheap') {
     const ship = d.shipping != null && d.shipping > 0 ? ` + ${money(d.shipping, d.currency)} ship` : '';
-    return `Cheapest VG+ copy is ${money(d.bestPrice, d.currency)}${ship} = <b>${pct(d.effectiveDiscount)} off</b> vs ${ref} — under the 40% scan threshold.`;
+    return `Cheapest VG+ copy is ${money(d.bestPrice, d.currency)}${ship} = <b>${pct(d.effectiveDiscount)} off</b> vs ${ref} — under the 40% scan threshold.${gapTxt(d.effectiveDiscount ?? d.discount)}`;
   }
   if (d.reasonCode === 'unconfirmed-not-cheap') {
-    return `Couldn't read condition. Cheapest ${money(d.lowest, d.currency)} ≈ <b>${pct(d.discount)} off</b> vs ${ref} — under 40%.`;
+    return `Couldn't read condition. Cheapest ${money(d.lowest, d.currency)} ≈ <b>${pct(d.discount)} off</b> vs ${ref} — under 40%.${gapTxt(d.discount)}`;
   }
   return 'Looked cheap but didn’t qualify.';
 }
@@ -424,9 +431,17 @@ function sortDeals(list, mode) {
   return c;
 }
 
+// Enrichment cache: enrich() only depends on the loaded deals + the shipping slider, but render()
+// runs on every keypress/slider move — re-enriching hundreds of deals per keystroke made the filter
+// inputs laggy. allDeals is only ever REASSIGNED (never mutated in place), so a reference check is
+// a safe cache key.
+let enrichCache = { src: null, ship: null, list: [] };
+
 function render() {
   if (activeTab === 'gems') return renderGems();
-  const enriched = allDeals.map(enrich);
+  const ship = shipVal();
+  if (enrichCache.src !== allDeals || enrichCache.ship !== ship) enrichCache = { src: allDeals, ship, list: allDeals.map(enrich) };
+  const enriched = enrichCache.list;
   let deals = applyFilters(enriched);
   // How many deals pass every OTHER filter but are removed SOLELY by "VG+ only"? Cloud/email deals
   // can never carry a confirmed grade, so "VG+ only" silently hides every one of them — which is
@@ -565,6 +580,44 @@ async function refreshHealth() {
   setServiceBadge(h);
 }
 
+// --- Sold-medians push badge -------------------------------------------------
+// The local scan's git push of soldmedians.json is what keeps the CLOUD emails judging against
+// real market value. A failed push used to flash by in the scan-status line and vanish — weeks of
+// silently-stale references. This badge persists the last outcome: green "medians ✓", red "push
+// failed" (click = retry). Hidden entirely when pushing doesn't apply (packaged install / disabled).
+let pushRetrying = false;
+async function refreshPushStatus() {
+  if (!hasApi || typeof window.api.getPushStatus !== 'function') return;
+  const el = $('push-badge');
+  if (!el || pushRetrying) return;
+  let st = null;
+  try { st = await window.api.getPushStatus(); } catch { st = null; }
+  if (!st) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  if (st.ok) {
+    el.className = 'pill push ok';
+    el.textContent = `medians ✓ ${st.ts ? ago(st.ts) : ''}`.trim();
+    el.title = st.pushed
+      ? 'Sold-medians pushed to GitHub — the cloud emails judge against fresh real-market references.'
+      : 'Sold-medians already up to date on GitHub.';
+  } else {
+    el.className = 'pill push bad';
+    el.textContent = '⚠ medians push failed';
+    el.title = `Pushing soldmedians.json to GitHub failed: ${st.reason || 'git error'}\nThe cloud emails are judging against stale references until this succeeds. Click to retry.`;
+  }
+}
+async function retryPushClick() {
+  if (!hasApi || typeof window.api.retryPush !== 'function' || pushRetrying) return;
+  const el = $('push-badge');
+  // Only a failed state needs the retry; a green badge click is a no-op.
+  if (!el || !el.classList.contains('bad')) return;
+  pushRetrying = true;
+  el.textContent = 'pushing…';
+  try { await window.api.retryPush(); } catch { /* outcome is persisted by main either way */ }
+  pushRetrying = false;
+  refreshPushStatus();
+}
+
 function notifyNew(deals) {
   if (firstLoad) { firstLoad = false; deals.forEach((d) => seenIds.add(d.id)); return; }
   const fresh = deals.filter((d) => !seenIds.has(d.id));
@@ -696,7 +749,9 @@ function onScanProgress(m) {
     const miss = m.nearMisses ? ` · ${m.nearMisses} near-miss${m.nearMisses === 1 ? '' : 'es'} (tick “Show near-misses”)` : '';
     const warm = m.warmedReal ? ` · ${m.warmedReal} sold-median${m.warmedReal === 1 ? '' : 's'} ${m.fullMedians ? 'refreshed' : 'learned'}` : '';
     const gem = m.gems ? ` · 💎 ${m.gems} rare gem${m.gems === 1 ? '' : 's'} (see the Rare tab)` : '';
-    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${gem}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
+    const cf = m.cfFailed ? ` · ⚠ ${m.cfFailed} release${m.cfFailed === 1 ? '' : 's'} didn’t clear Cloudflare (estimate shown — retried next scan)` : '';
+    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${gem}${ship}${dropped}${cf}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
+    refreshPushStatus(); // the scan may just have pushed (or failed to push) the medians
     return;
   }
   // 'scan' phase: the API sweep and the browser confirmation run concurrently now, so one message
@@ -879,6 +934,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
   $('svc-badge').addEventListener('click', () => { const u = $('svc-badge').dataset.url; if (u) openUrl(u); });
+  $('push-badge').addEventListener('click', retryPushClick);
   $('set-cancel').addEventListener('click', closeSettings);
   $('set-save').addEventListener('click', saveSettings);
   $('set-test-btn').addEventListener('click', testConnection);
@@ -914,6 +970,8 @@ window.addEventListener('DOMContentLoaded', () => {
     // ~15 min, and this is the only api.github.com traffic (deals come from the raw CDN), so 30
     // req/hr stays well under the 60/hr unauthenticated limit.
     setInterval(refreshHealth, 120_000);
+    refreshPushStatus();          // sold-medians push badge (persists a failed push until it succeeds)
+    setInterval(refreshPushStatus, 5 * 60_000);
     maybeAutoScan();              // auto-scan on launch if the last scan is stale (keeps emails sharp)
     setInterval(maybeAutoScan, 15 * 60_000); // re-check every 15 min so the configured cadence (e.g. hourly) is actually honored while the app stays open
   }

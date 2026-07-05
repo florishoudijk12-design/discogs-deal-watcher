@@ -73,6 +73,13 @@ function git(args, ms = 45_000) {
   });
 }
 
+// The last push outcome, PERSISTED — a failed push used to flash in the scan-status line for a few
+// seconds and vanish, while the cloud silently kept judging deals against stale references for
+// weeks. The topbar badge reads this file so a failure stays visible until a push succeeds.
+const PUSH_STATUS_FILE = () => path.join(app.getPath('userData'), 'push-status.json');
+function readPushStatus() { try { return JSON.parse(fs.readFileSync(PUSH_STATUS_FILE(), 'utf8')); } catch { return null; } }
+function writePushStatus(st) { try { fs.writeFileSync(PUSH_STATUS_FILE(), JSON.stringify(st)); } catch { /* best effort */ } }
+
 // Auto-commit + push the refreshed soldmedians.json so the cloud email watcher picks it up with NO
 // manual git step (the whole point: "Scan now" is the only action). soldmedians.json is local-only and
 // the cloud bot's deals.json is remote-only, so the rebase pull that integrates the bot's commits never
@@ -449,9 +456,11 @@ async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
   const shipMap = shipRes ? (shipRes.map || {}) : null;
 
   // Per-copy condition + price via the same-origin JSON fetch (robust structured data, no selectors).
-  // Strategy 1: in-page fetch on the sell page we're already on.
+  // Strategy 1: in-page fetch on the sell page we're already on. Two tries only — when the in-page
+  // fetch fails it's structural (CSP/challenge), not transient, so extra retries just delayed the
+  // fallback by ~1.5s per candidate.
   let lr = null;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 2; i++) {
     if (scrapeAbort) break;
     lr = await cfWin.webContents.executeJavaScript(LISTINGS_FETCH(releaseId, currency)).catch((e) => ({ error: String((e && e.message) || e) }));
     if (lr && Array.isArray(lr.items)) break;
@@ -543,6 +552,7 @@ async function runScrape(win, opts = {}) {
     let droppedNoVgPlus = 0;
     let unconfirmed = 0;
     let realShip = 0; // confirmed deals carrying REAL per-copy shipping (joined from the page, not estimated)
+    let cfFailed = 0; // candidates where Cloudflare never cleared — surfaced in the done line, retried next scan
     const marketUrl = (id) => `${engine.releaseMarketUrl(id)}?sort=price%2Casc&limit=25&currency=${config.currency}`;
 
     // Confirm ONE candidate through the browser: read the REAL data the official API hides — the
@@ -554,7 +564,11 @@ async function runScrape(win, opts = {}) {
       const cachedSold = store.getSoldMedian(c.rel.releaseId);
       // A deep "full + medians" scan re-scrapes every median (ignoring the weekly cache) so all
       // references are guaranteed current; a normal scan reuses a fresh cached median to save time.
-      const soldFresh = !opts.fullMedians && !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS));
+      // Either way, a release the interleaved warm-up ALREADY scraped this run is fresh by
+      // definition — don't pay the release-page navigation twice in one scan.
+      const soldFresh = scrapedThisRun.has(c.rel.releaseId)
+        ? !!cachedSold
+        : (!opts.fullMedians && !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS)));
 
       let data = { cleared: false, sold: null, listings: null };
       try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency, { needSold: !soldFresh }); } catch { /* leave defaults */ }
@@ -641,6 +655,7 @@ async function runScrape(win, opts = {}) {
         // Listings unreachable (Cloudflare didn't clear / API shape changed) -> fall back to the
         // API-only estimate so the feature degrades gracefully. Marked unconfirmed; the dashboard's
         // "VG+ only" filter hides it unless it at least looks VG+ by price.
+        if (!data.cleared) cfFailed++; // count the "never got past Cloudflare" case for the done line
         const sig = engine.evaluateMarketSignal({
           lowest: c.stats.lowestPrice,
           soldMedian: sold ? sold.median : null,
@@ -671,6 +686,47 @@ async function runScrape(win, opts = {}) {
       }
     }
 
+    // --- Sold-median warm-up (coverage builder) — INTERLEAVED, not a serial post-pass -----------
+    // The candidate pipeline only scrapes a sold-median for releases that LOOKED cheap. Releases
+    // sitting at a normal price never get their true market value learned — so when one suddenly
+    // gets a just-listed cheap copy (the prime diamond event), the cloud has no real median and must
+    // judge it against the often-inflated VG+ suggestion. Each FULL scan therefore tops up a bounded
+    // budget of not-yet-covered releases, caching the real median (or a "never sold" sentinel).
+    // The probes run in the CONSUMER'S IDLE TIME: while the API pacing hasn't produced a candidate
+    // yet, the browser does a warm-up probe instead of sleeping — the old serial post-pass added
+    // 1.5-2 min AFTER the progress bar hit 100%; now most (often all) of it hides inside the sweep.
+    // Whatever budget is left when the pipeline ends drains in a short post-pass. Quick scans skip
+    // it; "Full + medians" lifts the budget to the whole wantlist and ignores the weekly TTL.
+    const WARMUP_BUDGET = opts.quick ? 0 : (opts.fullMedians ? work.length : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })());
+    const soldFreshNow = (id) => { const sm = store.getSoldMedian(id); return !!(sm && sm.ts && (Date.now() - sm.ts < SOLD_TTL_MS)); };
+    const warmupQueue = WARMUP_BUDGET > 0
+      ? work
+        .filter((rel) => (opts.fullMedians ? true : !soldFreshNow(rel.releaseId)))
+        .sort((a, b) => { const sa = store.getSoldMedian(a.releaseId), sb = store.getSoldMedian(b.releaseId); return (sa ? sa.ts : 0) - (sb ? sb.ts : 0); }) // never-cached first, then oldest
+      : [];
+    let warmupIdx = 0, warmedReal = 0, warmedChecked = 0;
+    const warmupTotal = Math.min(WARMUP_BUDGET, warmupQueue.length); // display estimate (skips can shrink the real count)
+    // Probe ONE warm-up target (release page only, no API calls). Returns false when the queue or
+    // budget is exhausted. Targets that were scraped by the pipeline mid-run — or became fresh —
+    // are skipped for free.
+    async function warmupNext() {
+      while (warmupIdx < warmupQueue.length && warmedChecked < WARMUP_BUDGET) {
+        if (scrapeAbort) return false;
+        const rel = warmupQueue[warmupIdx++];
+        if (scrapedThisRun.has(rel.releaseId)) continue;              // pipeline already read this release page
+        if (!opts.fullMedians && soldFreshNow(rel.releaseId)) continue; // became fresh mid-run
+        let d = { cleared: false, sold: null };
+        try { d = await loadReleaseData(cfWin, rel.releaseId, config.currency, { soldOnly: true }); } catch { /* transient — retry next scan */ }
+        if (d.sold) scrapedThisRun.add(rel.releaseId); // a later candidate for this release needn't re-scrape
+        if (d.sold && d.sold.median != null) { store.setSoldMedian(rel.releaseId, d.sold); warmedReal++; }
+        else if (d.cleared && d.sold) { store.setSoldMedian(rel.releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', ts: Date.now() }); }
+        warmedChecked++;
+        await sleep(300);
+        return true;
+      }
+      return false;
+    }
+
     // PIPELINE: the API sweep (Phase 1, hits api.discogs.com) and the browser confirmation (Phase 2,
     // hits www.discogs.com) use independent rate limits, so run them CONCURRENTLY instead of one after
     // the other — the browser work fills the time the API pacing would otherwise spend idle. A single
@@ -687,6 +743,10 @@ async function runScrape(win, opts = {}) {
         if (scrapeAbort) break;
         if (!queue.length) {
           if (producerDone) break;
+          // Idle: no candidate ready yet. Spend the wait on a sold-median warm-up probe (same
+          // window, zero API calls) instead of sleeping — candidates still take priority the
+          // moment one lands in the queue (re-checked every iteration).
+          if (await warmupNext()) continue;
           await new Promise((r) => { wake = r; }); // sleep until a candidate is enqueued (or producer ends)
           continue;
         }
@@ -762,37 +822,13 @@ async function runScrape(win, opts = {}) {
     if (wake) { wake(); wake = null; } // let the consumer finish draining the queue
     await consumer;
 
-    // --- Sold-median warm-up (coverage builder) -------------------------------------------------
-    // The candidate pipeline only scrapes a sold-median for releases that LOOKED cheap. Releases
-    // sitting at a normal price never get their true market value learned — so when one suddenly gets
-    // a just-listed cheap copy (the prime diamond event), the cloud has no real median and must judge
-    // it against the often-inflated VG+ suggestion (a missed diamond, or a false positive). To close
-    // that gap, each FULL scan tops up a bounded budget of not-yet-covered releases — regardless of
-    // current price — caching the real median (or a "never sold" sentinel so we don't re-try weekly).
-    // Over a few scans the whole wantlist gets a real reference. Quick scans skip this (they're for
-    // speed); the cf window + cf_clearance are already warm here, and it needs no API calls.
-    let warmedReal = 0, warmedChecked = 0;
-    // A deep "full + medians" scan lifts the per-scan warm-up cap and re-scrapes EVERY median
-    // (ignoring the weekly freshness cache), so the whole wantlist's references are refreshed in one
-    // run instead of 50 at a time. A normal full scan keeps the bounded top-up; quick skips it.
-    const WARMUP_BUDGET = opts.quick ? 0 : (opts.fullMedians ? work.length : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })());
-    if (WARMUP_BUDGET > 0 && !scrapeAbort) {
-      const fresh = (id) => { const sm = store.getSoldMedian(id); return !!(sm && sm.ts && (Date.now() - sm.ts < SOLD_TTL_MS)); };
-      const targets = work
-        .filter((rel) => (opts.fullMedians ? !scrapedThisRun.has(rel.releaseId) : !fresh(rel.releaseId)))
-        .sort((a, b) => { const sa = store.getSoldMedian(a.releaseId), sb = store.getSoldMedian(b.releaseId); return (sa ? sa.ts : 0) - (sb ? sb.ts : 0); }) // never-cached first, then oldest
-        .slice(0, WARMUP_BUDGET);
-      for (let i = 0; i < targets.length; i++) {
-        if (scrapeAbort) break;
-        send({ phase: 'warmup', checked: i, total: targets.length, found: deals.length });
-        let d = { cleared: false, sold: null };
-        try { d = await loadReleaseData(cfWin, targets[i].releaseId, config.currency, { soldOnly: true }); } catch { /* transient — retry next scan */ }
-        if (d.sold && d.sold.median != null) { store.setSoldMedian(targets[i].releaseId, d.sold); warmedReal++; }
-        else if (d.cleared && d.sold) { store.setSoldMedian(targets[i].releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', ts: Date.now() }); }
-        warmedChecked++;
-        await sleep(300);
+    // Drain whatever warm-up budget the interleaved probes didn't get through during the pipeline
+    // (on a candidate-heavy scan the consumer had little idle time). Often this is already empty.
+    if (!scrapeAbort && warmedChecked < WARMUP_BUDGET && warmupIdx < warmupQueue.length) {
+      send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length });
+      while (!scrapeAbort && await warmupNext()) {
+        send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length });
       }
-      send({ phase: 'warmup', checked: targets.length, total: targets.length, found: deals.length });
     }
 
     deals.sort((a, b) => (b.discount ?? 0) - (a.discount ?? 0));
@@ -842,11 +878,12 @@ async function runScrape(win, opts = {}) {
       if (soldMediansExported && readSettings().autoPushMedians !== false) {
         send({ phase: 'pushing' });
         mediansPush = await autoPushSoldMedians();
+        writePushStatus({ ts: Date.now(), ...mediansPush }); // feeds the persistent topbar badge
       }
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, gems: gemsFound.length, zeroWatch: zeroWatchOut.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
-    return { deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
+    send({ phase: 'done', checked: total, total, found: deals.length, gems: gemsFound.length, zeroWatch: zeroWatchOut.length, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
+    return { deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
@@ -923,6 +960,19 @@ ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) she
 ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContents(e.sender), opts || {}));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });
 ipcMain.handle('scrape:last', () => lastScan());
+// Medians push status — null hides the badge (packaged installs never push: there's no repo; and
+// with autoPushMedians off there's nothing to report). Retry lets the user fix a red badge in place.
+ipcMain.handle('medians:pushStatus', () => {
+  if (app.isPackaged || readSettings().autoPushMedians === false) return null;
+  return readPushStatus();
+});
+ipcMain.handle('medians:retryPush', async () => {
+  if (app.isPackaged) return { ok: false, pushed: false, reason: 'not available in a packaged install' };
+  const res = await autoPushSoldMedians();
+  const st = { ts: Date.now(), ...res };
+  writePushStatus(st);
+  return st;
+});
 
 function createWindow() {
   const win = new BrowserWindow({

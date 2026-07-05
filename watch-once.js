@@ -1,16 +1,21 @@
 'use strict';
 /*
- * watch-once.js — ONE sweep of a rotating slice of the wantlist, then exit.
+ * watch-once.js — sweep the wantlist (once, or repeatedly within a time budget), then exit.
  *
- * This is the "GitHub Actions every few minutes" model (vs watcher.js, the always-on loop):
- * each scheduled run checks `sliceSize` releases starting where the last run left off
- * (cursor persisted in state/cursor.json), advancing the cursor so successive runs cover the
- * whole wantlist over time. State (history, alert memory, suggestions, cursor) lives in state/
- * and is carried between runs via the Actions cache. Detected deals are emailed (Resend) and
- * written to deals.json (committed by the workflow so the desktop dashboard can read it).
+ * This is the "GitHub Actions" model (vs watcher.js, the always-on loop). GitHub deprioritizes
+ * public-repo schedule crons hard: a `*\/15` cron fires every ~60–90 min in practice (measured),
+ * with night gaps up to ~4 h — so a single sweep per tick means hours of detection latency for a
+ * just-listed copy. RUN_BUDGET_MINUTES counters that: with it set, one job keeps sweeping
+ * BACK-TO-BACK (emailing after every sweep) until the budget is spent, so the sparse ticks still
+ * yield near-continuous ~14-min coverage. Unset/0 = the original single sweep (local use).
+ *
+ * State (history, alert memory, suggestions, cursor) lives in state/ and is carried between runs
+ * via the Actions cache. Detected deals are emailed (Resend) and written to deals.json (committed
+ * by the workflow so the desktop dashboard can read it). 💎 rare gems are emailed the MOMENT they
+ * are found, not after the sweep — they're the most time-critical alert there is.
  *
  * Env (set as GitHub Secrets): DISCOGS_TOKEN, DISCOGS_USERNAME, RESEND_API_KEY, MAIL_TO,
- * MAIL_FROM, SLICE_SIZE. Run: `node watch-once.js`.
+ * MAIL_FROM, SLICE_SIZE, RUN_BUDGET_MINUTES. Run: `node watch-once.js`.
  */
 
 const fs = require('fs');
@@ -74,79 +79,110 @@ async function main() {
     console.warn('⚠ Using the Resend SANDBOX sender (onboarding@resend.dev) — high spam risk. Verify a domain in Resend and set MAIL_FROM. See README.');
   }
 
-  // Refresh the wantlist at most every wantlistRefreshMs (it changes rarely).
+  // Multi-sweep budget: 0/unset = one sweep and exit (the original model). With a budget (the
+  // Actions workflow sets ~50 min), keep sweeping back-to-back — each sweep re-ranks, re-checks and
+  // EMAILS — until the next sweep wouldn't fit. This is what turns GitHub's sparse cron ticks
+  // (~1/hour in practice, despite the */15 request) into near-continuous coverage.
+  const budgetMs = Math.max(0, parseFloat(process.env.RUN_BUDGET_MINUTES) || 0) * 60_000;
+  const runStart = Date.now();
   const cur = readCursor();
-  if (!cur.wantlist || !cur.wantlist.length || Date.now() - (cur.wantlistAt || 0) > config.wantlistRefreshMs) {
-    cur.wantlist = await client.getWantlist(config.username);
-    cur.wantlistAt = Date.now();
-    console.log(`Refreshed wantlist: ${cur.wantlist.length} releases.`);
-  }
-  const N = cur.wantlist.length;
-  if (!N) { console.log('Empty wantlist — nothing to do.'); writeCursor(cur); publishDeals(store, cur.wantlist); return; }
-
-  const now = Date.now();
-  const take = Math.min(sliceSize, N);
-  // Priority sweep: rank every release by how urgently it deserves a re-check (staleness +
-  // recent activity + rarity) and take the top `take`. This spends each run's API budget on the
-  // releases most likely to surface a JUST-LISTED bargain, while staleness still guarantees full
-  // coverage over time. (Replaces the old blind round-robin cursor.)
-  const ranked = cur.wantlist
-    .map((rel) => ({ rel, score: engine.releaseWatchScore(store.getHistory(rel.releaseId), now, { recentMs: config.minRecheckMs || 0 }) }))
-    .filter((x) => x.score >= 0)
-    .sort((a, b) => b.score - a.score);
-  const slice = (ranked.length ? ranked.map((x) => x.rel) : cur.wantlist).slice(0, take);
-  writeCursor(cur); // persist the wantlist cache (selection no longer needs a cursor index)
-  console.log(`Sweeping the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
-
-  const deals = [];
-  const gems = []; // 💎 rare appearances (0 for sale -> first copy) — emailed regardless of price
-  let checked = 0;
-  for (const rel of slice) {
-    try {
-      const { deal, gem } = await processRelease(rel, { client, store, engine, config });
-      if (deal) deals.push(deal);
-      if (gem) gems.push(gem);
-      checked++;
-    } catch (e) { console.log(`  release ${rel.releaseId} error: ${e.message}`); }
-  }
-
-  const sweepsToCover = Math.ceil(N / take);
-  console.log(`Checked ${checked}. Deals this run: ${deals.length}. Rare gems: ${gems.length}. (Full wantlist covered every ~${sweepsToCover} runs.)`);
-
-  // Lead with the strongest diamond: the email subject + first card come from deals[0], so order
-  // best-first (just-listed + real-sold-price + biggest discount rank highest).
-  deals.sort((a, b) => engine.dealValueScore(b) - engine.dealValueScore(a));
-
+  let sweepNo = 0;
+  let lastSweepMs = 0;
   let emailError = null;
-  // 💎 Gems first — the rare-appearance email is the most time-critical alert there is (a truly
-  // rare copy can sell within the hour), and it's sent SEPARATELY from the deals email so the
-  // subject line screams the event even when this sweep also found ordinary price deals.
-  if (gems.length) {
-    for (const g of gems) console.log(`  GEM 💎 ${g.artist} – ${g.title}  first copy for sale at ${g.currency} ${g.lowest} (was 0 for sale)`);
-    if (mailer.enabled) {
-      try { await mailer.sendGems(gems); console.log(`Emailed ${gems.length} rare gem(s) to ${config.email.to}.`); }
-      catch (e) { emailError = e; console.log('Gem email FAILED:', e.message); }
-    } else {
-      console.log('Email disabled — gems saved for the dashboard.');
-    }
-  }
-  if (deals.length) {
-    for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
-    if (mailer.enabled) {
-      try { await mailer.sendDeals(deals); console.log(`Emailed ${deals.length} deal(s) to ${config.email.to}.`); }
-      catch (e) { emailError = e; console.log('Email FAILED:', e.message); }
-    } else {
-      console.log('Email disabled — deals saved for the dashboard.');
-    }
-  }
 
-  publishDeals(store, cur.wantlist);
+  for (;;) {
+    sweepNo++;
+
+    // Refresh the wantlist at most every wantlistRefreshMs (it changes rarely).
+    if (!cur.wantlist || !cur.wantlist.length || Date.now() - (cur.wantlistAt || 0) > config.wantlistRefreshMs) {
+      cur.wantlist = await client.getWantlist(config.username);
+      cur.wantlistAt = Date.now();
+      writeCursor(cur);
+      console.log(`Refreshed wantlist: ${cur.wantlist.length} releases.`);
+    }
+    const N = cur.wantlist.length;
+    if (!N) { console.log('Empty wantlist — nothing to do.'); writeCursor(cur); publishDeals(store, cur.wantlist); return; }
+
+    const now = Date.now();
+    const take = Math.min(sliceSize, N);
+    // Priority sweep: rank every release by how urgently it deserves a re-check (staleness +
+    // recent activity + rarity) and take the top `take`. This spends each sweep's API budget on the
+    // releases most likely to surface a JUST-LISTED bargain, while staleness still guarantees full
+    // coverage over time. (Replaces the old blind round-robin cursor.) In budget mode a small
+    // recheck floor stops a tiny wantlist from being hammered back-to-back within one run.
+    const minRecheckMs = config.minRecheckMs || (budgetMs > 0 ? 3 * 60_000 : 0);
+    const ranked = cur.wantlist
+      .map((rel) => ({ rel, score: engine.releaseWatchScore(store.getHistory(rel.releaseId), now, { recentMs: minRecheckMs }) }))
+      .filter((x) => x.score >= 0)
+      .sort((a, b) => b.score - a.score);
+    if (!ranked.length && budgetMs > 0) {
+      // Everything was checked within the recheck floor (small wantlist) — wait it out instead of
+      // re-burning the API on releases we just saw, unless the budget is nearly spent anyway.
+      if (Date.now() - runStart + 60_000 > budgetMs) break;
+      await new Promise((r) => setTimeout(r, 60_000));
+      continue;
+    }
+    const slice = (ranked.length ? ranked.map((x) => x.rel) : cur.wantlist).slice(0, take);
+    writeCursor(cur); // persist the wantlist cache (selection no longer needs a cursor index)
+    const sweepStart = Date.now();
+    console.log(`[sweep ${sweepNo}] Checking the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
+
+    const deals = [];
+    let gemCount = 0;
+    let checked = 0;
+    for (const rel of slice) {
+      try {
+        const { deal, gem } = await processRelease(rel, { client, store, engine, config });
+        if (deal) deals.push(deal);
+        if (gem) {
+          gemCount++;
+          console.log(`  GEM 💎 ${gem.artist} – ${gem.title}  first copy for sale at ${gem.currency} ${gem.lowest} (was 0 for sale)`);
+          // 💎 Sent the MOMENT it's found — a truly rare copy can sell within the hour, so it must
+          // not wait out the rest of a ~14-min sweep. Sent separately from the deals email so the
+          // subject line screams the event. A send failure doesn't abort the sweep (the gem is
+          // already saved for the dashboard); it fails the run loudly at the end instead.
+          if (mailer.enabled) {
+            try { await mailer.sendGems([gem]); console.log(`  Emailed the rare gem to ${config.email.to}.`); }
+            catch (e) { emailError = e; console.log('  Gem email FAILED:', e.message); }
+          }
+        }
+        checked++;
+      } catch (e) { console.log(`  release ${rel.releaseId} error: ${e.message}`); }
+    }
+
+    const coverage = take >= N ? 'Full wantlist every sweep.' : `Full wantlist covered every ~${Math.ceil(N / take)} sweeps.`;
+    console.log(`[sweep ${sweepNo}] Checked ${checked}. Deals: ${deals.length}. Rare gems: ${gemCount}. (${coverage})`);
+
+    // Lead with the strongest diamond: the email subject + first card come from deals[0], so order
+    // best-first (just-listed + real-sold-price + biggest discount rank highest).
+    deals.sort((a, b) => engine.dealValueScore(b) - engine.dealValueScore(a));
+
+    if (deals.length) {
+      for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
+      if (mailer.enabled) {
+        try { await mailer.sendDeals(deals); console.log(`Emailed ${deals.length} deal(s) to ${config.email.to}.`); }
+        catch (e) { emailError = e; console.log('Email FAILED:', e.message); }
+      } else {
+        console.log('Email disabled — deals saved for the dashboard.');
+      }
+    }
+
+    // Publish after every sweep so the committed files are as fresh as possible whenever the job
+    // ends (the workflow commits once, after the last sweep).
+    publishDeals(store, cur.wantlist);
+
+    if (emailError) break; // stop sweeping — the loud non-zero exit below is the alert
+    lastSweepMs = Date.now() - sweepStart;
+    // Continue only if a next sweep (assumed ~as long as this one) still fits the budget.
+    if (!budgetMs || Date.now() - runStart + lastSweepMs > budgetMs) break;
+    console.log(`[sweep ${sweepNo}] took ${(lastSweepMs / 60_000).toFixed(1)} min — budget allows another sweep.`);
+  }
 
   // Turn a silent email failure into a LOUD one: exit non-zero so the GitHub Actions step fails and
   // GitHub's built-in "your workflow failed" notification reaches you. For a tool whose core output IS
   // the email, a swallowed send error means you simply stop getting deals and never find out. The
   // deals are already saved to deals.json above, so the dashboard still updates regardless.
-  if (emailError) { console.error('Exiting non-zero because the deal email failed to send.'); process.exit(1); }
+  if (emailError) { console.error('Exiting non-zero because a deal/gem email failed to send.'); process.exit(1); }
 }
 
 // Write deals.json + gems.json (for the dashboard) + state-seed.json (durable warm-up/dedupe backup)
