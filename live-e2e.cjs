@@ -30,7 +30,7 @@ const SEED_BASELINE = 18; // EUR — simulated "usual" price so a deal fires on 
 const EXTRA_RELEASES = [249504]; // Rick Astley NGGYU — guaranteed busy market for a strong demo
 
 async function main() {
-  const client = makeClient({ userAgent: 'DiscogsDealWatcher/0.1 (+live-e2e)' });
+  const client = makeClient({ userAgent: 'DiscogsDealShark/1.0 (+live-e2e)' });
 
   console.log(`\n[1] REAL wantlist  —  GET /users/${PUBLIC_WANTLIST_USER}/wants`);
   let wants = [];
@@ -82,7 +82,7 @@ async function main() {
 
   console.log(`\n[4] REAL email delivery via throwaway Ethereal SMTP (no account needed)...`);
   const acct = await nodemailer.createTestAccount();
-  const mailer = makeMailer({ host: 'smtp.ethereal.email', port: 587, secure: false, user: acct.user, pass: acct.pass, to: 'collector@example.com', from: 'Discogs Deal Watcher <watcher@example.com>' });
+  const mailer = makeMailer({ host: 'smtp.ethereal.email', port: 587, secure: false, user: acct.user, pass: acct.pass, to: 'collector@example.com', from: 'Discogs Deal Shark <watcher@example.com>' });
   const info = await mailer.sendDeals(deals);
   console.log('   sent! messageId:', info.messageId);
   console.log('   >>> OPEN THIS to see the real rendered email:');

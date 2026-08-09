@@ -184,7 +184,7 @@ function renderGemsEmail(gems) {
   return { subject, text, html };
 }
 
-const RESEND_DEFAULT_FROM = 'Discogs Deal Watcher <onboarding@resend.dev>';
+const RESEND_DEFAULT_FROM = 'Discogs Deal Shark <onboarding@resend.dev>';
 
 // Pure: the JSON body sent to the Resend API. Exported for testing.
 function buildResendPayload(cfg, mail) {
@@ -244,7 +244,7 @@ function gmailMailer(cfg) {
     auth: { user, pass },
   });
   const to = cfg.to || user;
-  const from = cfg.from || `Discogs Deal Watcher <${user}>`;
+  const from = cfg.from || `Discogs Deal Shark <${user}>`;
   const replyTo = cfg.replyTo || undefined;
   return {
     enabled: true,

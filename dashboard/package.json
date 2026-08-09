@@ -1,10 +1,10 @@
 {
-  "name": "discogs-deal-dashboard",
-  "productName": "Discogs Deal Watcher",
-  "version": "1.3.0",
+  "name": "discogs-deal-shark-dashboard",
+  "productName": "Discogs Deal Shark",
+  "version": "1.4.0",
   "private": true,
-  "description": "Discogs Deal Watcher — scans your Discogs wantlist for copies offered far under market value.",
-  "author": "Discogs Deal Watcher",
+  "description": "Discogs Deal Shark — hunts for underpriced vinyl, rare restocks and valuable records.",
+  "author": "Discogs Deal Shark",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -14,7 +14,7 @@
   },
   "build": {
     "appId": "com.discogsdealwatcher.app",
-    "productName": "Discogs Deal Watcher",
+    "productName": "Discogs Deal Shark",
     "directories": {
       "output": "dist"
     },
@@ -87,8 +87,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Discogs Deal Watcher",
-      "artifactName": "Discogs-Deal-Watcher-Setup-${version}.${ext}"
+      "shortcutName": "Discogs Deal Shark",
+      "include": "build/installer.nsh",
+      "artifactName": "Discogs-Deal-Shark-Setup-${version}.${ext}"
     },
     "mac": {
       "target": [
@@ -103,7 +104,7 @@
       "icon": "assets/icon.icns"
     },
     "dmg": {
-      "artifactName": "Discogs-Deal-Watcher-${version}-mac.${ext}"
+      "artifactName": "Discogs-Deal-Shark-${version}-mac.${ext}"
     }
   },
   "devDependencies": {

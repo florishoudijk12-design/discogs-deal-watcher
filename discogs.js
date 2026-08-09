@@ -17,7 +17,7 @@
  */
 
 const API = 'https://api.discogs.com';
-const DEFAULT_UA = 'DiscogsDealWatcher/1.0';
+const DEFAULT_UA = 'DiscogsDealShark/1.0';
 
 function makeClient(opts = {}) {
   const token = opts.token || '';

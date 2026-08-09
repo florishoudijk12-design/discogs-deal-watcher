@@ -1,4 +1,4 @@
-# install-shortcut.ps1 - put a "Discogs Deal Watcher" shortcut on the Desktop.
+# install-shortcut.ps1 - put a "Discogs Deal Shark" shortcut on the Desktop.
 # Points straight at the bundled electron.exe (a GUI app, so no console window flashes) with the
 # dashboard folder as the working dir, using our generated icon. Run:
 #   powershell -ExecutionPolicy Bypass -File tools/install-shortcut.ps1
@@ -20,7 +20,7 @@ if (-not (Test-Path $ico)) {
 }
 
 $desktop = [Environment]::GetFolderPath('Desktop')
-$lnkPath = Join-Path $desktop 'Discogs Deal Watcher.lnk'
+$lnkPath = Join-Path $desktop 'Discogs Deal Shark.lnk'
 
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($lnkPath)
@@ -28,7 +28,7 @@ $lnk.TargetPath       = $electron
 $lnk.Arguments        = '.'
 $lnk.WorkingDirectory = $dashboard
 $lnk.IconLocation     = "$ico,0"
-$lnk.Description       = 'Discogs Deal Watcher - wantlist bargains'
+$lnk.Description       = 'Discogs Deal Shark - vinyl deals and rare finds'
 $lnk.WindowStyle      = 1
 $lnk.Save()
 

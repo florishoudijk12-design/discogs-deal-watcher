@@ -40,7 +40,7 @@ module.exports = { parseGitHubOwner, sameAccount, filterRealMedians, mergeSoldMe
 
 if (require.main === module && process.argv.includes('--selftest')) {
   const assert = require('assert');
-  assert.strictEqual(parseGitHubOwner('https://github.com/norsnors/discogs-deal-watcher.git'), 'norsnors');
+  assert.strictEqual(parseGitHubOwner('https://github.com/norsnors/discogs-deal-shark.git'), 'norsnors');
   assert.strictEqual(parseGitHubOwner('git@github.com:DanielBNR/example.git'), 'DanielBNR');
   assert.strictEqual(parseGitHubOwner('C:\\local\\repo.git'), null);
   assert.ok(sameAccount('NorsNors', 'norsnors'));

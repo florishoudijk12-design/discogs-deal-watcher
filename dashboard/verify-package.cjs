@@ -26,8 +26,8 @@ const requiredAppFiles = [
   '/renderer.js',
   '/index.html',
   '/styles.css',
-  '/assets/logo.svg',
-  '/assets/icon.png'
+  '/assets/icon.png',
+  '/assets/thumbnail.png'
 ];
 
 for (const file of requiredAppFiles) {

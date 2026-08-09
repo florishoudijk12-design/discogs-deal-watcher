@@ -1,7 +1,7 @@
 {
   "username": "YOUR_DISCOGS_USERNAME",
   "token": "YOUR_DISCOGS_PERSONAL_ACCESS_TOKEN",
-  "userAgent": "DiscogsDealWatcher/0.1 (+mailto:you@example.com)",
+  "userAgent": "DiscogsDealShark/1.0 (+mailto:you@example.com)",
 
   "currency": "EUR",
   "minDiscount": 0.5,
@@ -21,7 +21,7 @@
     "provider": "resend",
     "apiKey": "re_YOUR_RESEND_API_KEY",
     "to": "you@example.com",
-    "from": "Discogs Deal Watcher <onboarding@resend.dev>",
+    "from": "Discogs Deal Shark <onboarding@resend.dev>",
     "replyTo": "you@example.com"
   },
 

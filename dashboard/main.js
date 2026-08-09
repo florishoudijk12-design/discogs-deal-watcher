@@ -6,7 +6,7 @@
  *   1. PASSIVE (default) — read the deals the cloud watcher already found:
  *        • GitHub Actions: read the committed deals.json (public repo: raw CDN, no token).
  *        • Live server:    watcher.js's token-protected /api/* endpoints.
- *      Ships pre-pointed at norsnors/discogs-deal-watcher so it works on first launch, no setup.
+ *      Can read a configured GitHub repository without exposing its token to the renderer.
  *   2. ACTIVE — the "Scan now" button runs a full local sweep of the whole wantlist right here
  *      (using the watcher's own engine + your local config.json token) and shows every current
  *      bargain immediately. See runScrape().
@@ -24,6 +24,23 @@ const { makeMedianPublisher } = require('./median-publisher');
 const { dedupeGems, cloudBusyFromRun, estimateScanEta } = require('./runtime-policy');
 const { makeListingHistory } = require('./listing-history');
 const { normalizeScoutOptions, normalizeSearchResult, suggestionSnapshot, scoutScore, sortScoutResults } = require('./scout-policy');
+
+// Preserve settings for users upgrading from Deal Watcher. Electron derives a new user-data folder
+// from productName; switching blindly would make an upgraded app look like a clean install. Fresh
+// installs use the new Deal Shark folder, while an existing legacy profile remains authoritative.
+const DEFAULT_USER_DATA_DIR = app.getPath('userData');
+const APP_DATA_DIR = app.getPath('appData');
+const LEGACY_USER_DATA_DIRS = app.isPackaged
+  ? [path.join(APP_DATA_DIR, 'Discogs Deal Watcher')]
+  : [path.join(APP_DATA_DIR, 'discogs-deal-dashboard'), path.join(APP_DATA_DIR, 'Electron')];
+const PROFILE_MARKERS = ['settings.json', 'config.json', 'last-scan.json', 'last-scout.json', 'push-status.json', 'state'];
+function hasDashboardProfile(directory) {
+  return PROFILE_MARKERS.some((name) => fs.existsSync(path.join(directory, name)));
+}
+if (!hasDashboardProfile(DEFAULT_USER_DATA_DIR)) {
+  const legacyProfile = LEGACY_USER_DATA_DIRS.find(hasDashboardProfile);
+  if (legacyProfile) app.setPath('userData', legacyProfile);
+}
 
 // Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
 //   • dev run  — one level up, in the project checkout.
@@ -73,7 +90,13 @@ const DEFAULT_SETTINGS = {
 };
 
 function readSettings() {
-  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) }; }
+  try {
+    const settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) };
+    if (String(settings.githubRepo).toLowerCase() === 'norsnors/discogs-deal-watcher') {
+      settings.githubRepo = 'norsnors/discogs-deal-shark';
+    }
+    return settings;
+  }
   catch { return { ...DEFAULT_SETTINGS }; }
 }
 function writeSettings(s) {
@@ -1428,7 +1451,7 @@ async function testConfig({ username, token } = {}) {
   let makeClient;
   try { ({ makeClient } = loadWatcher()); }
   catch (e) { return { ok: false, error: e.message }; }
-  const client = makeClient({ token: (token || '').trim(), userAgent: 'DiscogsDealWatcher/1.0 (desktop setup test)' });
+  const client = makeClient({ token: (token || '').trim(), userAgent: 'DiscogsDealShark/1.0 (desktop setup test)' });
   let who;
   try {
     const id = await client.req('/oauth/identity');
@@ -1502,7 +1525,8 @@ ipcMain.handle('medians:retryPush', async () => {
 // The Discogs credentials are reused from the local config.json (the first-run wizard already
 // collected them); the GitHub/Resend tokens are used here and stored ONLY as encrypted GitHub
 // Actions secrets on the user's own fork — never persisted locally.
-const UPSTREAM_REPO = 'norsnors/discogs-deal-watcher';
+const UPSTREAM_REPO = 'norsnors/discogs-deal-shark';
+const LEGACY_UPSTREAM_REPO = 'norsnors/discogs-deal-watcher';
 
 async function ghReq(token, method, pathname, body) {
   const to = withTimeout(20_000);
@@ -1536,11 +1560,16 @@ async function encryptSecret(publicKeyB64, value) {
 
 async function findExistingFork(githubToken, login) {
   const configured = (readSettings().githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
-  const candidates = [...new Set([configured, `${login}/discogs-deal-watcher`].filter(Boolean))];
+  const candidates = [...new Set([
+    configured,
+    `${login}/discogs-deal-shark`,
+    `${login}/discogs-deal-watcher`
+  ].filter(Boolean))];
   for (const candidate of candidates) {
     const response = await ghReq(githubToken, 'GET', `/repos/${candidate}`);
     const repo = response.data;
-    if (response.status === 200 && repo && repo.fork && repo.parent && String(repo.parent.full_name).toLowerCase() === UPSTREAM_REPO.toLowerCase()) {
+    const parent = repo && repo.parent ? String(repo.parent.full_name).toLowerCase() : '';
+    if (response.status === 200 && repo && repo.fork && [UPSTREAM_REPO, LEGACY_UPSTREAM_REPO].map((name) => name.toLowerCase()).includes(parent)) {
       return repo.full_name;
     }
   }
@@ -1707,7 +1736,7 @@ async function telegramTest({ botToken, chatId } = {}) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId, parse_mode: 'HTML', disable_web_page_preview: true,
-        text: '✅ <b>Discogs Deal Watcher</b> is connected. Deal &amp; 💎 rare-gem alerts will arrive here.',
+        text: '✅ <b>Discogs Deal Shark</b> is connected. Deal &amp; 💎 rare-gem alerts will arrive here.',
       }),
       signal: to2.signal,
     });
@@ -1781,7 +1810,7 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1120, height: 800, minWidth: 720, minHeight: 520,
     show: false, backgroundColor: '#0f1115',
-    title: 'Discogs Deal Watcher',
+    title: 'Discogs Deal Shark',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });

@@ -1,24 +1,24 @@
-<p align="center"><img src="dashboard/assets/thumbnail.png" width="190" alt="Discogs Deal Watcher logo"></p>
+<p align="center"><img src="dashboard/assets/thumbnail.png" width="220" alt="Discogs Deal Shark logo"></p>
 
-<h1 align="center">Discogs Deal Watcher</h1>
+<h1 align="center">Discogs Deal Shark</h1>
 
 <p align="center"><strong>Find underpriced vinyl, catch rare restocks and scout valuable records outside your wantlist.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/norsnors/discogs-deal-watcher/releases/latest"><img src="https://img.shields.io/github/v/release/norsnors/discogs-deal-watcher?style=flat-square&amp;color=ef4444" alt="Latest release"></a>
-  <a href="https://github.com/norsnors/discogs-deal-watcher/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/norsnors/discogs-deal-watcher/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="Build status"></a>
-  <a href="https://github.com/norsnors/discogs-deal-watcher/releases"><img src="https://img.shields.io/github/downloads/norsnors/discogs-deal-watcher/total?style=flat-square&amp;color=2563eb" alt="Total downloads"></a>
-  <a href="https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-Setup-1.3.0.exe"><img src="https://img.shields.io/badge/Windows-x64-0078d4?style=flat-square&amp;logo=windows" alt="Windows x64"></a>
-  <a href="https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-1.3.0-mac.dmg"><img src="https://img.shields.io/badge/macOS-Intel%20%2B%20Apple%20Silicon-111827?style=flat-square&amp;logo=apple" alt="macOS universal"></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/releases/latest"><img src="https://img.shields.io/github/v/release/norsnors/discogs-deal-shark?style=flat-square&amp;color=06b6d4" alt="Latest release"></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/norsnors/discogs-deal-shark/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="Build status"></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/releases"><img src="https://img.shields.io/github/downloads/norsnors/discogs-deal-shark/total?style=flat-square&amp;color=2563eb" alt="Total downloads"></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-Setup-1.4.0.exe"><img src="https://img.shields.io/badge/Windows-x64-0078d4?style=flat-square&amp;logo=windows" alt="Windows x64"></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-1.4.0-mac.dmg"><img src="https://img.shields.io/badge/macOS-Intel%20%2B%20Apple%20Silicon-111827?style=flat-square&amp;logo=apple" alt="macOS universal"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-Setup-1.3.0.exe"><strong>Download for Windows</strong></a>
-  · <a href="https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-1.3.0-mac.dmg"><strong>Download for macOS</strong></a>
+  <a href="https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-Setup-1.4.0.exe"><strong>Download for Windows</strong></a>
+  · <a href="https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-1.4.0-mac.dmg"><strong>Download for macOS</strong></a>
   · <a href="INSTALL.md">Install guide</a>
 </p>
 
-Discogs Deal Watcher is a desktop companion for record collectors. It combines your Discogs
+Discogs Deal Shark is a desktop companion for record collectors. It combines your Discogs
 wantlist, current marketplace listings, shipping, condition and sold-price references into a small
 daily review queue. Buying always stays on Discogs and always remains manual.
 
@@ -37,9 +37,9 @@ Scout excludes releases already on your wantlist. A result is only added when yo
 
 | Platform | Installer | Architecture |
 |---|---|---|
-| Windows | [Discogs-Deal-Watcher-Setup-1.3.0.exe](https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-Setup-1.3.0.exe) | x64 |
-| macOS | [Discogs-Deal-Watcher-1.3.0-mac.dmg](https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/Discogs-Deal-Watcher-1.3.0-mac.dmg) | Universal: Intel + Apple Silicon |
-| Verification | [SHA256SUMS.txt](https://github.com/norsnors/discogs-deal-watcher/releases/download/v1.3.0/SHA256SUMS.txt) | SHA-256 |
+| Windows | [Discogs-Deal-Shark-Setup-1.4.0.exe](https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-Setup-1.4.0.exe) | x64 |
+| macOS | [Discogs-Deal-Shark-1.4.0-mac.dmg](https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/Discogs-Deal-Shark-1.4.0-mac.dmg) | Universal: Intel + Apple Silicon |
+| Verification | [SHA256SUMS.txt](https://github.com/norsnors/discogs-deal-shark/releases/download/v1.4.0/SHA256SUMS.txt) | SHA-256 |
 
 > [!IMPORTANT]
 > The installers are currently unsigned. Windows can show a SmartScreen warning and macOS needs a
@@ -77,8 +77,8 @@ requests. Results and sold medians are cached locally so later scans can reuse r
 Requirements: Node.js 20+ and npm.
 
 ```powershell
-git clone https://github.com/norsnors/discogs-deal-watcher.git
-Set-Location discogs-deal-watcher
+git clone https://github.com/norsnors/discogs-deal-shark.git
+Set-Location discogs-deal-shark
 npm ci
 npm run selftest
 
@@ -106,6 +106,6 @@ packaged resources and creates SHA-256 checksums before publishing.
 - [Installation and first-run guide](INSTALL.md)
 - [Technical architecture, detection logic and deployment reference](docs/TECHNICAL.md)
 - [Release notes](RELEASE_NOTES.md)
-- [Latest GitHub release](https://github.com/norsnors/discogs-deal-watcher/releases/latest)
+- [Latest GitHub release](https://github.com/norsnors/discogs-deal-shark/releases/latest)
 
-Questions or a reproducible bug? [Open an issue](https://github.com/norsnors/discogs-deal-watcher/issues).
+Questions or a reproducible bug? [Open an issue](https://github.com/norsnors/discogs-deal-shark/issues).

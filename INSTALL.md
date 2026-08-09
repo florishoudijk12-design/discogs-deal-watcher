@@ -1,4 +1,4 @@
-# Discogs Deal Watcher — Install & Setup
+# Discogs Deal Shark — Install & Setup
 
 A desktop app that scans your Discogs **wantlist** and shows you copies that are for sale far
 under their real market value — with the real media condition (VG+ / NM …), real shipping to your
@@ -12,7 +12,7 @@ to a cart and never buys a record.
 
 ### Windows
 
-1. Download **`Discogs-Deal-Watcher-Setup-<version>.exe`**.
+1. Download **`Discogs-Deal-Shark-Setup-<version>.exe`**.
 2. Double-click it and follow the installer (you can choose the install folder). It creates a
    Start-menu and desktop shortcut, and an uninstaller.
 
@@ -21,21 +21,23 @@ to a cart and never buys a record.
 > is normal for small/independent apps.
 
 The app keeps your settings and scan cache in your per-user app-data folder
-(`%APPDATA%\Discogs Deal Watcher`), not in the install folder — so it survives upgrades and never
-needs admin rights to run.
+(`%APPDATA%\Discogs Deal Shark`), not in the install folder — so it survives upgrades and never
+needs admin rights to run. Upgrades from Discogs Deal Watcher automatically keep using the existing
+`%APPDATA%\Discogs Deal Watcher` profile, so saved credentials, settings and scan history remain intact.
 
 ### macOS (universal — Apple Silicon + Intel)
 
-1. Download **`Discogs-Deal-Watcher-<version>-mac.dmg`**, open it, and drag the app into
+1. Download **`Discogs-Deal-Shark-<version>-mac.dmg`**, open it, and drag the app into
    **Applications**.
 2. The app isn't signed with a paid Apple Developer certificate, so the first launch needs one
    manual unlock:
    - **Right-click the app → Open → Open** (don't double-click the first time — macOS blocks
      unsigned apps opened that way).
    - If macOS still reports it as *"damaged"* or *"can't be opened"* (common on Apple Silicon), open
-     **Terminal** and run `xattr -cr "/Applications/Discogs Deal Watcher.app"`, then open it normally.
+     **Terminal** and run `xattr -cr "/Applications/Discogs Deal Shark.app"`, then open it normally.
 
-Settings and the scan cache live in `~/Library/Application Support/Discogs Deal Watcher`.
+Settings and the scan cache live in `~/Library/Application Support/Discogs Deal Shark`. Upgrades
+continue to recognize an existing `~/Library/Application Support/Discogs Deal Watcher` profile.
 
 Each GitHub release also contains `SHA256SUMS.txt`. You can use it to verify that the downloaded
 installer is byte-for-byte identical to the file built by GitHub Actions.
@@ -131,5 +133,6 @@ when your cloud watcher last ran. Notes:
 
 ## 6. Uninstall
 
-Use **Settings → Apps → Discogs Deal Watcher → Uninstall**, or the uninstaller in the install
-folder. To also remove your saved settings/cache, delete `%APPDATA%\Discogs Deal Watcher`.
+Use **Settings → Apps → Discogs Deal Shark → Uninstall**, or the uninstaller in the install
+folder. To also remove your saved settings/cache, delete `%APPDATA%\Discogs Deal Shark`. If you
+upgraded from Deal Watcher, its legacy `%APPDATA%\Discogs Deal Watcher` profile may still be in use.

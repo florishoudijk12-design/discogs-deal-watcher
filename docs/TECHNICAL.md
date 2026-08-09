@@ -1,4 +1,4 @@
-# Discogs Deal Watcher — Technical reference
+# Discogs Deal Shark — Technical reference
 
 > Looking for downloads and a quick product overview? Start at the main [README](../README.md).
 
@@ -188,8 +188,8 @@ the trailing median learned over time.)
 
 ```powershell
 $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
-git clone https://github.com/norsnors/discogs-deal-watcher.git
-Set-Location discogs-deal-watcher
+git clone https://github.com/norsnors/discogs-deal-shark.git
+Set-Location discogs-deal-shark
 Copy-Item config.example.json config.json   # then edit config.json with your values
 npm install
 npm start                                    # paced sweep + dashboard API on :8787
@@ -219,7 +219,7 @@ npm run build:mac         # -> dist/Discogs-Deal-Watcher-<version>-mac.dmg (run 
 ```
 
 **Works on first launch — no setup.** It ships pointed at the public repo
-`norsnors/discogs-deal-watcher` in **GitHub** mode, so it reads the committed `deals.json` straight
+`norsnors/discogs-deal-shark` in **GitHub** mode, so it reads the committed `deals.json` straight
 from the raw CDN (no token). Only open ⚙ **Settings** to change source:
 
 - **GitHub Actions** (default): the **repo** (`owner/name`); a **GitHub access token** is needed
@@ -266,7 +266,7 @@ powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1 # put a laun
 
 `tools/make-icon.ps1` draws the vinyl-record / price-drop logo with GDI+ (no ImageMagick) into
 `dashboard/assets/` — `logo.svg` is the in-app header art, `icon.png` the window icon, `icon.ico`
-the exe + shortcut icon. `tools/install-shortcut.ps1` drops a "Discogs Deal Watcher" shortcut on the
+the exe + shortcut icon. `tools/install-shortcut.ps1` drops a "Discogs Deal Shark" shortcut on the
 Desktop pointing at the bundled `electron.exe`.
 
 ## Deploy — two options

@@ -1,5 +1,5 @@
 {
-  "name": "discogs-deal-watcher",
+  "name": "discogs-deal-shark",
   "version": "0.1.0",
   "private": true,
   "description": "Watches your Discogs wantlist and alerts you when a copy is offered far under its median price.",
