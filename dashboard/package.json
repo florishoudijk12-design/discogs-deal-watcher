@@ -21,6 +21,9 @@
     "files": [
       "main.js",
       "scan-policy.js",
+      "git-policy.js",
+      "median-publisher.js",
+      "runtime-policy.js",
       "preload.js",
       "renderer.js",
       "index.html",

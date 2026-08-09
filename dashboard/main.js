@@ -18,8 +18,10 @@
 const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
 const { scanMinDiscount, parseMoney, evaluateScanPreliminary } = require('./scan-policy');
+const { filterRealMedians } = require('./git-policy');
+const { makeMedianPublisher } = require('./median-publisher');
+const { dedupeGems, cloudBusyFromRun, estimateScanEta } = require('./runtime-policy');
 
 // Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
 //   • dev run  — one level up, in the project checkout.
@@ -65,15 +67,6 @@ function withTimeout(ms) {
   return { signal: ctrl.signal, done: () => clearTimeout(t) };
 }
 
-// Run a git command in the watcher repo. Rejects on non-zero exit or timeout. Terminal prompts are
-// disabled so a missing credential fails fast instead of hanging the app waiting for input.
-function git(args, ms = 45_000) {
-  return new Promise((resolve, reject) => {
-    execFile('git', ['-C', WATCHER_DIR, ...args], { timeout: ms, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
-      (err, stdout, stderr) => { if (err) { err.stderr = stderr; reject(err); } else resolve((stdout || '').trim()); });
-  });
-}
-
 // The last push outcome, PERSISTED — a failed push used to flash in the scan-status line for a few
 // seconds and vanish, while the cloud silently kept judging deals against stale references for
 // weeks. The topbar badge reads this file so a failure stays visible until a push succeeds.
@@ -81,23 +74,19 @@ const PUSH_STATUS_FILE = () => path.join(app.getPath('userData'), 'push-status.j
 function readPushStatus() { try { return JSON.parse(fs.readFileSync(PUSH_STATUS_FILE(), 'utf8')); } catch { return null; } }
 function writePushStatus(st) { try { fs.writeFileSync(PUSH_STATUS_FILE(), JSON.stringify(st)); } catch { /* best effort */ } }
 
-// Auto-commit + push the refreshed soldmedians.json so the cloud email watcher picks it up with NO
-// manual git step (the whole point: "Scan now" is the only action). soldmedians.json is local-only and
-// the cloud bot's deals.json is remote-only, so the rebase pull that integrates the bot's commits never
-// conflicts. Fully best-effort: any failure is reported back, never thrown into the scan.
-async function autoPushSoldMedians() {
+// Publish from a detached temporary worktree based on the latest origin/main. This guarantees the
+// dashboard can commit ONLY soldmedians.json: the developer's current branch, staged files and local
+// code commits are never touched or pushed. Per-release timestamps merge concurrent cloud/local data.
+let medianPublisher = null;
+function localRealMedians() {
+  try { return filterRealMedians(JSON.parse(fs.readFileSync(path.join(stateDir(), 'soldmedians.json'), 'utf8'))); }
+  catch { return {}; }
+}
+async function autoPushSoldMedians(input = null) {
   try {
-    await git(['add', 'soldmedians.json']);
-    // `diff --cached --quiet` exits 0 when nothing is staged (file unchanged) -> nothing to push.
-    try { await git(['diff', '--cached', '--quiet', '--', 'soldmedians.json']); return { ok: true, pushed: false, reason: 'unchanged' }; }
-    catch { /* non-zero exit = there IS a staged change -> continue committing */ }
-    // Commit only this file. `git commit` without a path would also include unrelated changes the
-    // user happened to have staged in this checkout.
-    await git(['commit', '--only', '-m', 'Auto: refresh sold-medians from dashboard scan', '--', 'soldmedians.json']);
-    // Integrate the cloud bot's deals.json commits first, or the push is rejected (non-fast-forward).
-    await git(['pull', '--rebase', '--autostash', 'origin', 'main'], 90_000);
-    await git(['push', 'origin', 'main'], 60_000);
-    return { ok: true, pushed: true };
+    const medians = input || localRealMedians();
+    if (!medianPublisher) medianPublisher = makeMedianPublisher({ repoDir: WATCHER_DIR });
+    return await medianPublisher.publish(medians);
   } catch (e) {
     const msg = (e && (e.stderr || e.message)) ? String(e.stderr || e.message) : String(e);
     const firstLine = msg.split('\n').map((l) => l.trim()).find(Boolean) || 'git failed';
@@ -171,17 +160,6 @@ async function getStatus() {
 //   • server — the live /api/gems endpoint.
 //   • scan   — the LOCAL store's accumulated gems (state/gems.json, appended by runScrape) + the
 //              zero-stock watch list saved with the last scan.
-// One card per release: the stored feed is event-based, so a listing that flaps 0↔1 (seller
-// delists for half a day, relists) used to produce a duplicate card per re-appearance. Keep only
-// the NEWEST gem per releaseId (lists are newest-first in every source).
-function dedupeGems(list) {
-  const seen = new Set();
-  return (Array.isArray(list) ? list : []).filter((g) => {
-    if (!g || g.releaseId == null || seen.has(g.releaseId)) return false;
-    seen.add(g.releaseId);
-    return true;
-  });
-}
 async function getGems() {
   const s = readSettings();
   const src = s.sourceType || 'scan';
@@ -338,12 +316,7 @@ async function cloudScanActive() {
     if (!repo) return null;
     const h = await githubHealth({ ...s, githubRepo: repo });
     const run = h && h.ok ? h.run : null;
-    if (!run || (run.status !== 'in_progress' && run.status !== 'queued')) return null;
-    // Estimate when it frees the budget: schedule ticks run the ~70-min multi-sweep budget,
-    // Worker/manual dispatches do a single ~15-min sweep.
-    const budgetMs = (run.event === 'schedule' ? 75 : 16) * 60_000;
-    const endsInMs = Math.max(60_000, (run.startedAt || Date.now()) + budgetMs - Date.now());
-    return { startedAt: run.startedAt, event: run.event, url: run.url, endsInMs };
+    return cloudBusyFromRun(run);
   } catch { return null; }
 }
 
@@ -989,17 +962,13 @@ async function runScrape(win, opts = {}) {
     // yet discovered candidates, extrapolated from the hit-rate so far, plus the remaining warm-up
     // queue) at the measured per-op pace.
     const scanStart = Date.now();
-    const paceOf = (ms, ops, prior) => (ops >= 2 ? ms / ops : prior);
-    const etaMs = () => {
-      const apiRemaining = Math.max(0, total - scanned);
-      const apiPace = scanned >= 5 ? (Date.now() - scanStart) / scanned : 1300;
-      const candBacklog = Math.max(0, candidateCount - priced);
-      const expectedMore = scanned >= 10 ? (candidateCount / scanned) * apiRemaining : 0;
-      const warmRemaining = Math.max(0, Math.min(WARMUP_BUDGET - warmedChecked, warmupQueue.length - warmupIdx));
-      const browserLane = (candBacklog + expectedMore) * paceOf(candMs, candOps, 8000)
-        + warmRemaining * paceOf(warmMs, warmOps, 4500);
-      return Math.round(Math.max(apiRemaining * apiPace, browserLane));
-    };
+    const etaMs = () => estimateScanEta({
+      total, scanned, now: Date.now(), scanStart,
+      candidateCount, priced, candidateMs: candMs, candidateOps: candOps,
+      warmupBudget: WARMUP_BUDGET, warmedChecked,
+      warmupQueueLength: warmupQueue.length, warmupIndex: warmupIdx,
+      warmMs, warmOps,
+    });
     const progress = () => send({ phase: 'scan', checked: scanned, total, found: deals.length, candidates: candidateCount, processed: priced, queued: queue.length, etaMs: etaMs() });
 
     const consumer = (async () => {
@@ -1142,35 +1111,26 @@ async function runScrape(win, opts = {}) {
 
     try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut })); } catch { /* best effort */ }
 
-    // Export the accumulated REAL sales-history medians to a committable root file so the cloud email
-    // watcher can judge deals against true market value. The store keeps them in the gitignored
-    // state/soldmedians.json (which can't reach GitHub); soldmedians.json at the repo root can —
-    // commit + push it and watch-once.js seeds it on the next sweep. This is how a local scan makes
-    // the EMAILS smarter (its main job), beyond just showing results in the dashboard.
-    // Exporting medians to a committable root file + git-pushing them only makes sense for the OWNER
-    // running from the project checkout (there's a git repo and a cloud watcher to feed). A packaged,
-    // shared install has no repo — its medians just live in the local state/ cache, which is all the
-    // dashboard needs. So this whole step is dev-only.
+    // Publish the accumulated REAL sales-history medians so the cloud email watcher can judge deals
+    // against true market value. The publisher uses a detached temporary worktree; it never writes,
+    // stages or commits in the checkout from which this dashboard is running.
     let soldMediansExported = 0;
     let mediansPush = null;
+    let soldMediansForPush = null;
     if (!app.isPackaged) {
       try {
         const src = path.join(stateDir(), 'soldmedians.json');
         if (fs.existsSync(src)) {
           const sm = JSON.parse(fs.readFileSync(src, 'utf8'));
-          // Commit only REAL medians — drop the "never sold" sentinels (median null) the warm-up keeps
-          // locally to avoid re-scraping; the cloud only wants true market references.
-          const real = {};
-          if (sm && typeof sm === 'object') for (const [id, v] of Object.entries(sm)) if (v && v.median != null) real[id] = v;
-          soldMediansExported = Object.keys(real).length;
-          if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(real));
+          soldMediansForPush = filterRealMedians(sm);
+          soldMediansExported = Object.keys(soldMediansForPush).length;
         }
-      } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
+      } catch { /* non-fatal: publishing is a convenience, not the scan result */ }
 
       // Auto-commit + push the refreshed medians so the cloud emails use them with no manual git step.
       if (soldMediansExported && readSettings().autoPushMedians !== false) {
         send({ phase: 'pushing' });
-        mediansPush = await autoPushSoldMedians();
+        mediansPush = await autoPushSoldMedians(soldMediansForPush);
         writePushStatus({ ts: Date.now(), ...mediansPush }); // feeds the persistent topbar badge
       }
     }

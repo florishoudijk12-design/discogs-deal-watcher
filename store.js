@@ -228,7 +228,7 @@ function makeStore(dir) {
     // half a day and relisting) REPLACES the older gem for that release instead of stacking a
     // duplicate card. The email side is unaffected — this is only the stored feed.
     addGem(gem) {
-      gems = gems.filter((g) => !(g && g.releaseId === gem.releaseId));
+      gems = gems.filter((g) => !(g && String(g.releaseId) === String(gem.releaseId)));
       gems.unshift(gem);
       if (gems.length > GEMS_CAP) gems = gems.slice(0, GEMS_CAP);
       write('gems.json', gems);
