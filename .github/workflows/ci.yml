@@ -55,29 +55,28 @@ jobs:
       - name: Install dashboard dependencies
         working-directory: dashboard
         run: npm ci
-      - name: Build unpacked Windows app
+      - name: Build Windows installer
         working-directory: dashboard
-        run: npm run build:dir
-      - name: Verify packaged application resources
+        run: npm run build
+      - name: Verify installer and packaged application resources
         working-directory: dashboard
         shell: pwsh
         run: |
-          $required = @(
-            'engine.js', 'discogs.js', 'store.js', 'mailer.js', 'telegram.js',
-            'delivery.js', 'server.js', 'watcher.js', 'node_modules/nodemailer/package.json'
-          )
-          foreach ($file in $required) {
-            $path = Join-Path 'dist/win-unpacked/resources/watcher' $file
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing packaged watcher resource: $file" }
+          $version = node -p "require('./package.json').version"
+          $installer = "dist/Discogs-Deal-Watcher-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "Missing Windows installer: $installer"
           }
-          @'
-          const asar = require('@electron/asar');
-          const files = asar.listPackage('dist/win-unpacked/resources/app.asar');
-          for (const wanted of ['\\main.js', '\\scan-policy.js', '\\git-policy.js', '\\runtime-policy.js', '\\median-publisher.js', '\\preload.js', '\\renderer.js']) {
-            if (!files.includes(wanted)) throw new Error('Missing from app.asar: ' + wanted);
-          }
-          console.log('Packaged resources: OK');
-          '@ | node -
+          node verify-package.cjs `
+            'dist/win-unpacked/resources/app.asar' `
+            'dist/win-unpacked/resources/watcher'
+      - name: Upload tested Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-ci
+          path: dashboard/dist/Discogs-Deal-Watcher-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
 
   docker:
     needs: test

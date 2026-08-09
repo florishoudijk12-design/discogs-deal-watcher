@@ -1,70 +1,212 @@
-name: Build macOS app
+name: Build desktop release
 
-# Manual trigger: build a universal macOS .dmg of the dashboard and attach it to a release.
-# GitHub's macOS runners are free for public repos. The build is UNSIGNED (no Apple Developer
-# cert), so users clear quarantine once on first launch — see INSTALL.md / the release notes.
+# Build both desktop installers from one existing version tag. The release stays
+# in draft so it can be inspected before it is made public.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to attach the .dmg to'
+        description: 'Existing version tag to build (must match dashboard/package.json)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.3.0'
 
 permissions:
-  contents: write   # needed for `gh release upload`
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
+  validate:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout the requested tag
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            dashboard/package-lock.json
 
-      # electron-builder wants a .icns for macOS; generate it from the existing app icon.
-      - name: Make .icns from the app icon
-        working-directory: dashboard/assets
+      - name: Verify tag and app version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          set -e
-          rm -rf icon.iconset && mkdir icon.iconset
-          sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
-          sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
-          sips -z 32 32     icon.png --out icon.iconset/icon_32x32.png
-          sips -z 64 64     icon.png --out icon.iconset/icon_32x32@2x.png
-          sips -z 128 128   icon.png --out icon.iconset/icon_128x128.png
-          sips -z 256 256   icon.png --out icon.iconset/icon_128x128@2x.png
-          sips -z 256 256   icon.png --out icon.iconset/icon_256x256.png
-          sips -z 512 512   icon.png --out icon.iconset/icon_256x256@2x.png
-          sips -z 512 512   icon.png --out icon.iconset/icon_512x512.png
-          sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
-          iconutil -c icns icon.iconset -o icon.icns
-          rm -rf icon.iconset
+          set -euo pipefail
+          version="$(node -p "require('./dashboard/package.json').version")"
+          test "$RELEASE_TAG" = "v$version" || {
+            echo "Tag $RELEASE_TAG does not match dashboard version $version" >&2
+            exit 1
+          }
+          git tag --points-at HEAD | grep -Fx "$RELEASE_TAG"
 
       - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix dashboard
+
+      - name: Run tests and security audits
+        run: |
+          npm run selftest
+          npm audit --audit-level=high
+          npm audit --prefix dashboard --audit-level=high
+
+  build-windows:
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout the requested tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
         working-directory: dashboard
         run: npm ci
 
-      - name: Build universal macOS .dmg
+      - name: Build Windows installer
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Verify Windows installer and packaged resources
+        working-directory: dashboard
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $installer = "dist/Discogs-Deal-Watcher-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "Missing Windows installer: $installer"
+          }
+          node verify-package.cjs `
+            'dist/win-unpacked/resources/app.asar' `
+            'dist/win-unpacked/resources/watcher'
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: dashboard/dist/Discogs-Deal-Watcher-Setup-*.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - name: Checkout the requested tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Generate macOS icon from the 1024px release artwork
+        working-directory: dashboard/assets
+        run: |
+          set -euo pipefail
+          rm -rf icon.iconset
+          mkdir icon.iconset
+          sips -z 16 16     thumbnail.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     thumbnail.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     thumbnail.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     thumbnail.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   thumbnail.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   thumbnail.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   thumbnail.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   thumbnail.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   thumbnail.png --out icon.iconset/icon_512x512.png
+          cp thumbnail.png icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o icon.icns
+          rm -rf icon.iconset
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build universal macOS installer
         working-directory: dashboard
         env:
-          # Build unsigned: there's no Apple Developer cert in CI. electron-builder still ad-hoc
-          # signs the arm64 slice so the app can launch on Apple Silicon after quarantine removal.
+          # No paid Apple certificate is configured yet. INSTALL.md documents
+          # the one-time Gatekeeper override for this explicitly unsigned build.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:mac
 
-      - name: Upload .dmg as a workflow artifact
+      - name: Verify macOS installer and packaged resources
+        run: |
+          set -euo pipefail
+          dmg="$(find dashboard/dist -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          hdiutil verify "$dmg"
+          app_asar="$(find dashboard/dist -path '*/Discogs Deal Watcher.app/Contents/Resources/app.asar' -print -quit)"
+          test -n "$app_asar"
+          node dashboard/verify-package.cjs "$app_asar" "$(dirname "$app_asar")/watcher"
+
+      - name: Upload macOS installer
         uses: actions/upload-artifact@v7
         with:
-          name: macos-dmg
-          path: dashboard/dist/*.dmg
+          name: macos-installer
+          path: dashboard/dist/Discogs-Deal-Watcher-*-mac.dmg
           if-no-files-found: error
 
-      - name: Attach .dmg to the release
+  draft-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes from the requested tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-installer
+          path: release-assets/windows
+
+      - name: Download macOS installer
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-installer
+          path: release-assets/macos
+
+      - name: Generate SHA-256 checksums
+        run: sha256sum release-assets/windows/*.exe release-assets/macos/*.dmg > release-assets/SHA256SUMS.txt
+
+      - name: Create or update draft GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.inputs.release_tag }}" dashboard/dist/*.dmg --clobber --repo "${{ github.repository }}"
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          assets=(release-assets/windows/*.exe release-assets/macos/*.dmg release-assets/SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag \
+              --draft \
+              --title "Discogs Deal Watcher $RELEASE_TAG — Windows + macOS" \
+              --notes-file RELEASE_NOTES.md \
+              --repo "$GITHUB_REPOSITORY"
+          fi

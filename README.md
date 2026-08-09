@@ -6,8 +6,9 @@ direct link so you can buy it immediately.
 
 > Status: **live.** Runs every 15 min via GitHub Actions against a real 715-release wantlist and
 > emails new dips; the desktop dashboard reads the committed `deals.json` out of the box and has a
-> one-click **⚡ Scan now** button that sweeps the whole wantlist locally on demand. The acquisition
-> layer is API-only by necessity — see "The Cloudflare wall" below.
+> one-click **Scan wantlist** button for a full local sweep. Its **Scout** tab also searches by genre
+> or style for valuable records that are not yet on the wantlist. The acquisition layer is API-only
+> by necessity — see "The Cloudflare wall" below.
 
 ## The Cloudflare wall (the dominant constraint — read this first)
 
@@ -111,7 +112,7 @@ all?**". So next to the price-gated deal alerts there's a second, **price-blind*
 - **Dashboard: the 💎 Rare gems tab.** Gem alerts render as violet cards, and below them the
   **zero-stock watch list** — every wantlist release currently at 0 copies for sale — so you can see
   what's being waited on. The cloud publishes both in a committed **`gems.json`** (next to
-  `deals.json`); the local `⚡ Scan now` detects 0→1 itself too (against its own local history) and
+  `deals.json`); the local **Scan wantlist** action detects 0→1 itself too (against its own local history) and
   feeds the same tab. Deal sliders don't apply on this tab (availability is the signal, not price);
   only the search box filters.
 
@@ -121,7 +122,7 @@ A flat "≥50% off" rule on a 715-release wantlist surfaced ~250 hits — mostly
 "deal" isn't worth the trouble. The fix is **detect permissively, filter powerfully**, never a hard
 exclusion that could kill the once-in-a-lifetime steal:
 
-- **Reference = the REAL sales-history median (the `⚡ Scan now` path).** Discogs's `price_suggestions`
+- **Reference = the REAL sales-history median (the Scan wantlist path).** Discogs's `price_suggestions`
   is an algorithmic guess and is often wrong, which matters because the reference sets the discount.
   The local scan instead reads the actual **Last Sold / Low / Median / High** off each release page —
   what copies *truly* trade for — via a hidden Electron `BrowserWindow` (your residential IP clears
@@ -210,7 +211,8 @@ In the dashboard's ⚙ Settings, pick source **Live server**, set URL = `http://
 Set-Location "Z:\Claude code\discogs-deal-watcher\dashboard"
 npm install
 npm start                 # dev
-npm run build             # -> dist\DiscogsDeals-win32-x64\DiscogsDeals.exe (Windows .exe)
+npm run build             # -> dist\Discogs-Deal-Watcher-Setup-<version>.exe
+npm run build:mac         # -> dist/Discogs-Deal-Watcher-<version>-mac.dmg (run on macOS)
 ```
 
 **Works on first launch — no setup.** It ships pointed at the public repo
@@ -221,21 +223,36 @@ from the raw CDN (no token). Only open ⚙ **Settings** to change source:
   *only* for a private repo (fine-grained PAT, *Contents: read-only*). Public repo → leave blank.
 - **Live server** (watcher.js on Fly / localhost): enter the **Server URL** + **Dashboard token**.
 
-It polls every 30s and gives you **live sliders + sort** to hunt the real diamonds without re-scanning
-(min value / min % off / max total / assumed shipping; just-listed, hide-possibly-worn; Sort → Best
-first), tags `🆕 just listed` copies and the implied condition, and shows a desktop notification on a
-new deal (see "Finding the real diamonds"). The HTTP to GitHub/your server happens in the Electron
-**main** process, so tokens never touch the page.
+The dashboard has three focused views: **Deals** for the daily review queue and price history,
+**Rare gems** for wantlist releases that return after having zero stock, and **Scout** for valuable
+records outside the wantlist. It shows a desktop notification for a new deal (see "Finding the real
+diamonds"). HTTP requests and stored tokens stay in Electron's **main** process and never touch the
+rendered page.
 
-### ⚡ Scan now (local full sweep, on demand)
+### Scan wantlist (local full sweep, on demand)
 
-The green **Scan now** button is independent of the source setting: it runs a **full local sweep of
+The **Scan wantlist** button is independent of the source setting: it runs a **full local sweep of
 your whole wantlist right then** — using the watcher's own engine + your local `config.json` token.
 Two phases: (1) a fast API pass over all releases to shortlist the cheap-looking ones, then (2) for
 each of those it fetches the **real sales-history median** off the release page (hidden Electron
 `BrowserWindow`, residential IP clears Cloudflare) and re-judges the discount against that true market
 value. A progress bar shows count + ETA and it's cancellable. Results are GET-only — it never carts or
 buys. (First scan is slowest — it caches each release's price suggestion + sold-median for a week.)
+
+### Scout (discover records outside the wantlist)
+
+Scout searches Discogs by **style** or **genre**, filters candidates on an estimated VG+ value and
+excludes releases already on the wantlist. A result can be opened on Discogs or added to the
+wantlist with an explicit **Add to wantlist** click. Scout never adds anything to a cart and never
+buys a record.
+
+## Desktop releases
+
+Run the manual **Build desktop release** workflow with an existing version tag such as `v1.3.0`.
+The workflow checks that the tag matches `dashboard/package.json`, tests the code, builds the real
+Windows NSIS installer and universal macOS DMG from that exact tag, verifies both packages, and
+creates or updates a **draft** GitHub release with SHA-256 checksums. See `INSTALL.md` for the
+current unsigned-app warnings on Windows and macOS.
 
 ### Logo + desktop shortcut
 
@@ -301,7 +318,7 @@ Three things can make the watcher stop working without any error you'd notice. A
 - **The cron getting disabled.** GitHub disables scheduled workflows after 60 days with no *user*
   activity — and the bot's own `deals.json` commits **don't** reset that timer. A
   [`keepalive-workflow`](https://github.com/gautamkrishnar/keepalive-workflow) step (and your regular
-  local **⚡ Scan now** pushes, which commit as *you*) keep it alive. If it ever does pause, just hit
+  local **Scan wantlist** pushes, which commit as *you*) keep it alive. If it ever does pause, just hit
   **Run workflow** in the Actions tab or push any commit.
 
 A failed deal email now also **exits non-zero**, so GitHub's built-in "workflow failed" notification

@@ -2,8 +2,9 @@
 
 A desktop app that scans your Discogs **wantlist** and shows you copies that are for sale far
 under their real market value — with the real media condition (VG+ / NM …), real shipping to your
-country, and a direct buy link. It only ever **reads** Discogs and shows you deals; it never buys
-anything.
+country, and a direct buy link. The **Scout** tab can also discover valuable records outside your
+wantlist and add one only after you explicitly click **Add to wantlist**. The app never adds anything
+to a cart and never buys a record.
 
 ---
 
@@ -36,6 +37,9 @@ needs admin rights to run.
 
 Settings and the scan cache live in `~/Library/Application Support/Discogs Deal Watcher`.
 
+Each GitHub release also contains `SHA256SUMS.txt`. You can use it to verify that the downloaded
+installer is byte-for-byte identical to the file built by GitHub Actions.
+
 ---
 
 ## 2. First run — connect your Discogs account
@@ -55,8 +59,9 @@ On first launch a short **setup wizard** appears asking for:
 3. Click **Generate new token** and copy the string it gives you.
 4. Paste it into the wizard's **token** field.
 
-The token gives the app read access to *your own* wantlist and to Discogs' per-condition price
-suggestions. Keep it private (it's like a password). It's stored locally on your PC only.
+The token lets the app read *your own* wantlist and Discogs' price information. Scout uses the same
+token to add a release only when you explicitly press **Add to wantlist**. Keep the token private
+(it's like a password). It's stored locally on your computer only.
 
 Click **Test connection** to confirm it works (it should say *"signed in as … · N releases on the
 wantlist"*), then **Save & scan**.
@@ -65,20 +70,22 @@ wantlist"*), then **Save & scan**.
 
 ## 3. Using it
 
-- **⚡ Scan now** — sweeps your **whole** wantlist (~13 min for ~700 releases; it's rate-limited by
-  Discogs). For each release it finds the cheapest copy that is genuinely **VG+ or better**, reads
-  the real shipping to your location, and compares it to the real sales-history median.
-- **⚡ Quick** — only the highest-priority releases (~4–5 min). The rest roll into the next scan.
-- **⚡ Full + medians** — a full scan that also refreshes every release's sold-median (slow, ~30–60
-  min); use it occasionally to keep the value references current.
-- **Filters / sliders** (top bar) — min value, min % off, max total, assumed shipping, *Just listed*,
-  *VG+ only*. All run instantly over the loaded results — no re-scan needed.
-- **Sort → Best first** ranks the strongest "diamonds" to the top.
-- **Background scan** (⚙ Settings) — re-scan automatically every N hours while the app is open, so
-  the deals stay fresh without clicking. Set to *Off* to disable.
+- **Scan wantlist** — sweeps your whole wantlist. For each release it looks for a copy that is
+  genuinely **VG+ or better**, includes the real shipping to your location, refreshes sold medians,
+  and compares the total with real sales history. Large wantlists can take a while because Discogs
+  rate-limits these requests.
+- **Deals** — the daily review queue. Search the results, inspect the discount explanation and price
+  history, dismiss records you do not want, and open promising listings on Discogs.
+- **Rare gems** — watches wantlist releases that had zero copies for sale and highlights them when a
+  copy becomes available. Availability is the signal here, regardless of price.
+- **Scout** — choose a Discogs style or genre, set a minimum estimated VG+ value (for example €80),
+  and search for valuable releases outside your wantlist. Existing wantlist items are excluded.
+  **Add to wantlist** performs exactly that one Discogs action; buying always remains manual.
+- **Background scan** (⚙ Settings) — refresh automatically every N hours while the app is open. Set
+  it to *Off* to disable it.
 
-Click any deal card to open it on Discogs. The app never adds to cart or buys — you always complete
-the purchase yourself.
+Click a deal or Scout result to inspect it on Discogs. The app never adds to cart or buys — you
+always complete the purchase yourself.
 
 ---
 
