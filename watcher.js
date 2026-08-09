@@ -108,6 +108,7 @@ function zeroWatch(store, wantlist) {
 //          fired REGARDLESS of price (dedupe via a per-release cooldown only)
 async function processRelease(rel, deps) {
   const { client, store, engine, config } = deps;
+  const pending = [];
   const stats = await client.getMarketplaceStats(rel.releaseId, config.currency);
   // Read the previous observation BEFORE pushing the new one so we can spot a just-listed copy
   // (num_for_sale rising between checks) — the only "freshly listed" signal the API gives us.
@@ -120,14 +121,15 @@ async function processRelease(rel, deps) {
   // Cached, weekly-refreshed price suggestions (token required; ignore failures).
   // We keep the FULL per-condition ladder now (for impliedGrade), not just VG+/VG.
   let sug = store.getSuggestion(rel.releaseId);
-  if (config.token && (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS)) {
+  const suggestionComplete = sug && Object.prototype.hasOwnProperty.call(sug, 'ladder');
+  if (config.token && (!suggestionComplete || Date.now() - sug.ts > SUGGESTION_TTL_MS)) {
     try {
       const raw = await client.getPriceSuggestions(rel.releaseId);
       if (raw) {
         const ladder = engine.extractLadder(raw);
         sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder };
-        store.setSuggestion(rel.releaseId, sug);
-      }
+      } else sug = { ts: Date.now(), vgplus: null, vg: null, ladder: null, unavailable: true };
+      store.setSuggestion(rel.releaseId, sug);
     } catch (e) { /* unavailable -> trailing-median fallback */ }
   }
 
@@ -145,7 +147,7 @@ async function processRelease(rel, deps) {
   // can't re-fire the same copy every sweep; a copy that appears, sells, and is re-listed after the
   // cooldown alerts again — that's a genuinely new chance at a rare record, exactly what we want.
   let gem = null;
-  if (rareAppearance) {
+  if (rareAppearance && !store.hasPendingAlert('gem', rel.releaseId)) {
     const ra = store.getRareAlerted(rel.releaseId);
     const cooldown = config.rareCooldownMs ?? DEFAULTS.rareCooldownMs;
     if (!ra || Date.now() - ra.ts > cooldown) {
@@ -172,7 +174,7 @@ async function processRelease(rel, deps) {
         ts: Date.now(),
       };
       store.addGem(gem);
-      store.setRareAlerted(rel.releaseId, { ts: Date.now(), numForSale: stats.numForSale });
+      pending.push(store.queuePendingAlert('gem', gem));
     }
   }
 
@@ -191,7 +193,7 @@ async function processRelease(rel, deps) {
   const fire = engine.shouldFire(sig, store.historyCount(rel.releaseId), {
     mode: config.mode, ownDropFactor: config.ownDropFactor, warmupMin: config.warmupMin, freshListing,
   });
-  if (!fire) return { deal: null, gem };
+  if (!fire || store.hasPendingAlert('deal', rel.releaseId)) return { deal: null, gem, pending };
 
   const deal = {
     id: `${rel.releaseId}-${Date.now()}`,
@@ -227,8 +229,8 @@ async function processRelease(rel, deps) {
     ts: Date.now(),
   };
   store.addDeal(deal);
-  store.setAlerted(rel.releaseId, { lowest: stats.lowestPrice, ts: Date.now() });
-  return { deal, gem };
+  pending.push(store.queuePendingAlert('deal', deal));
+  return { deal, gem, pending };
 }
 
 async function run() {
@@ -238,6 +240,7 @@ async function run() {
   const { makeMailer } = require('./mailer');
   const { makeTelegram } = require('./telegram');
   const { makeServer } = require('./server');
+  const { flushPendingAlerts } = require('./delivery');
 
   const config = loadConfig();
   if (!config.username) { console.error('Missing DISCOGS_USERNAME / config.username — cannot read a wantlist.'); process.exit(1); }
@@ -251,6 +254,16 @@ async function run() {
   const telegram = makeTelegram(config.telegram);
   log(telegram.enabled ? 'Telegram push on (redundant second channel).' : 'Telegram push off (no telegram.botToken/chatId).');
 
+  async function deliver(ids = null, force = false) {
+    const r = await flushPendingAlerts({ store, mailer, telegram, ids, force });
+    if (r.emailSent) log(`delivered ${r.emailSent} pending alert(s) by email.`);
+    if (r.telegramSent) log(`delivered ${r.telegramSent} pending alert(s) by Telegram.`);
+    for (const e of r.emailErrors) log(`pending ${e.kind} email FAILED:`, e.error);
+    for (const e of r.telegramErrors) log(`pending ${e.kind} Telegram push failed:`, e.error);
+    return r;
+  }
+  await deliver(); // retry alerts left pending by an earlier outage or process restart
+
   const state = { wantlistSize: 0, lastSweepAt: null, sweepCount: 0, lastReleaseAt: null, lastError: null, mailer: mailer.enabled };
   const server = makeServer({
     store,
@@ -258,7 +271,8 @@ async function run() {
     getStatus: () => ({ ...state, dealsStored: store.countDeals(), rateRemaining: client.rateRemaining }),
     getZeroWatch: () => zeroWatch(store, wantlist),
   });
-  server.listen(config.dashboardPort, () => log(`Dashboard API on :${config.dashboardPort}${config.dashboardToken ? ' (token-protected)' : ' (OPEN — set DASHBOARD_TOKEN!)'}`));
+  const dashboardHost = config.dashboardToken ? '0.0.0.0' : '127.0.0.1';
+  server.listen(config.dashboardPort, dashboardHost, () => log(`Dashboard API on ${dashboardHost}:${config.dashboardPort}${config.dashboardToken ? ' (token-protected)' : ' (local-only — set DASHBOARD_TOKEN for remote access)'}`));
 
   let wantlist = [];
   let idx = 0;
@@ -280,32 +294,18 @@ async function run() {
       idx++;
       if (idx % wantlist.length === 0) { state.sweepCount++; state.lastSweepAt = Date.now(); }
 
-      const { deal, gem } = await processRelease(rel, { client, store, engine, config });
+      const { deal, gem, pending } = await processRelease(rel, { client, store, engine, config });
       state.lastReleaseAt = Date.now();
       state.lastError = null;
 
       if (gem) {
         log(`GEM 💎 ${gem.artist} – ${gem.title}  first copy for sale at ${gem.currency} ${gem.lowest}  (was 0 for sale)`);
-        if (mailer.enabled) {
-          try { await mailer.sendGems([gem]); log('  gem emailed.'); }
-          catch (e) { log('  gem email FAILED:', e.message); }
-        }
-        if (telegram.enabled) {
-          try { await telegram.sendGems([gem]); log('  gem pushed to Telegram.'); }
-          catch (e) { log('  gem Telegram push failed (best-effort):', e.message); }
-        }
       }
       if (deal) {
         log(`DEAL${deal.freshListing ? ' 🆕' : '  '} ${deal.artist} – ${deal.title}  ${deal.currency} ${deal.lowest}  (${Math.round(deal.discount * 100)}% off ${deal.referenceSource}${deal.suspicious ? ', suspicious' : ''})`);
-        if (mailer.enabled) {
-          try { await mailer.sendDeals([deal]); log('  emailed.'); }
-          catch (e) { log('  email FAILED:', e.message); }
-        }
-        if (telegram.enabled) {
-          try { await telegram.sendDeals([deal]); log('  pushed to Telegram.'); }
-          catch (e) { log('  Telegram push failed (best-effort):', e.message); }
-        }
       }
+      if (pending.length) await deliver(pending.map((item) => item.id), true);
+      else await deliver(); // retry old failures when their five-minute backoff expires
 
       if (config.perReleaseGapMs) await sleep(config.perReleaseGapMs);
     } catch (e) {
@@ -353,10 +353,14 @@ if (require.main === module && process.argv.includes('--itest')) {
     assert.strictEqual((await processRelease(rel, deps)).deal, null, 'standing cheap copy does not fire in balanced mode');
 
     // Obs 5 (12): a genuine dip ~52% under its own median, >50% under VG+ suggestion, priced like VG -> FIRE.
-    const dip = (await processRelease(rel, deps)).deal;
+    const dipResult = await processRelease(rel, deps);
+    const dip = dipResult.deal;
     assert.ok(dip, 'genuine new-low trustworthy dip fires');
     assert.ok(dip.ownDrop > 0.4, 'dip is well under its own usual lowest');
     assert.ok(!dip.suspicious, '12 is above the VG suggestion 10 -> priced like a real copy, not worn/suspicious');
+    assert.strictEqual(store.getAlerted(555), null, 'detection does not acknowledge a notification');
+    store.ackPendingAlert(dipResult.pending.find((item) => item.kind === 'deal').id);
+    assert.strictEqual(store.getAlerted(555).lowest, 12, 'delivery acknowledgement updates deal dedupe');
 
     // Obs 6 (12): same price -> not a new low -> no re-alert.
     assert.strictEqual((await processRelease(rel, deps)).deal, null, 'same dip price does not re-alert');
@@ -411,6 +415,9 @@ if (require.main === module && process.argv.includes('--itest')) {
     assert.strictEqual(r3.gem.numForSale, 1, 'gem carries the for-sale count');
     assert.strictEqual(r3.gem.reference, 30, 'gem carries the VG+ suggestion as context');
     assert.strictEqual(r3.gem.referenceSource, 'suggestion');
+    assert.strictEqual(store.getRareAlerted(888), null, 'detection alone does not acknowledge delivery');
+    store.ackPendingAlert(r3.pending.find((item) => item.kind === 'gem').id);
+    assert.ok(store.getRareAlerted(888), 'delivery acknowledgement starts the rare-gem cooldown');
     r3 = await processRelease(rel3, deps3);
     assert.strictEqual(r3.gem, null, 'obs3: 1 -> 2 is fresh but not rare (a copy was already for sale)');
     r3 = await processRelease(rel3, deps3);
@@ -423,6 +430,20 @@ if (require.main === module && process.argv.includes('--itest')) {
     r3 = await processRelease(rel3, deps3);
     assert.ok(r3.gem, 'obs7: a NEW appearance after the cooldown fires again');
     assert.strictEqual(store.countGems(), 2, 'two gems recorded for the dashboard feed');
+
+    // Discogs sometimes has no price suggestion. Cache that absence too, otherwise every sweep
+    // repeats an API request that cannot improve the result.
+    let missingSuggestionCalls = 0;
+    const client4 = {
+      async getMarketplaceStats() { return { lowestPrice: 50, numForSale: 5, currency: 'EUR' }; },
+      async getPriceSuggestions() { missingSuggestionCalls++; return null; },
+    };
+    const rel4 = { releaseId: 999, title: 'No suggestion', artist: 'Unknown', year: 1980 };
+    const deps4 = { client: client4, store, engine, config };
+    await processRelease(rel4, deps4);
+    await processRelease(rel4, deps4);
+    assert.strictEqual(missingSuggestionCalls, 1, 'a missing suggestion is negatively cached');
+    assert.ok(Object.prototype.hasOwnProperty.call(store.getSuggestion(999), 'ladder'), 'negative cache has a completeness sentinel');
 
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log('watcher itest: all assertions passed');

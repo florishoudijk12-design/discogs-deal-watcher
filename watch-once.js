@@ -26,11 +26,21 @@ const { makeStore } = require('./store');
 const { makeMailer } = require('./mailer');
 const { makeTelegram } = require('./telegram');
 const { processRelease, loadConfig, zeroWatch } = require('./watcher');
+const { flushPendingAlerts } = require('./delivery');
 
 const STATE_DIR = path.join(__dirname, 'state');
 const cursorFile = () => path.join(STATE_DIR, 'cursor.json');
 const readCursor = () => { try { return JSON.parse(fs.readFileSync(cursorFile(), 'utf8')); } catch { return { wantlistAt: 0, wantlist: [] }; } };
 const writeCursor = (c) => fs.writeFileSync(cursorFile(), JSON.stringify(c));
+
+function assessSweepHealth(total, checked, failed, samples = []) {
+  const failureLimit = Math.max(3, Math.ceil(total * 0.2));
+  if (checked === 0 || failed >= failureLimit) {
+    const detail = samples.length ? ` Examples: ${samples.join('; ')}` : '';
+    return { ok: false, failureLimit, message: `Sweep unhealthy: ${checked}/${total} releases succeeded and ${failed} failed.${detail}` };
+  }
+  return { ok: true, failureLimit };
+}
 
 async function main() {
   const config = loadConfig();
@@ -101,6 +111,18 @@ async function main() {
   let sweepNo = 0;
   let lastSweepMs = 0;
   let emailError = null;
+  let sweepError = null;
+
+  async function deliver(ids = null, force = false) {
+    const r = await flushPendingAlerts({ store, mailer, telegram, ids, force });
+    if (r.emailSent) console.log(`Delivered ${r.emailSent} pending alert(s) by email.`);
+    if (r.telegramSent) console.log(`Delivered ${r.telegramSent} pending alert(s) by Telegram.`);
+    for (const e of r.emailErrors) { emailError = new Error(e.error); console.log(`Pending ${e.kind} email FAILED:`, e.error); }
+    for (const e of r.telegramErrors) console.log(`Pending ${e.kind} Telegram push failed:`, e.error);
+    return r;
+  }
+  // Retry detections left pending by an earlier provider outage or process restart.
+  await deliver();
 
   for (;;) {
     sweepNo++;
@@ -140,12 +162,19 @@ async function main() {
     console.log(`[sweep ${sweepNo}] Checking the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}, telegram=${telegram.enabled ? 'on' : 'off'}).`);
 
     const deals = [];
+    const dealPending = new Map();
     let gemCount = 0;
     let checked = 0;
+    let failed = 0;
+    const failureSamples = [];
     for (const rel of slice) {
       try {
-        const { deal, gem } = await processRelease(rel, { client, store, engine, config });
-        if (deal) deals.push(deal);
+        const { deal, gem, pending } = await processRelease(rel, { client, store, engine, config });
+        if (deal) {
+          deals.push(deal);
+          const p = pending.find((item) => item.kind === 'deal');
+          if (p) dealPending.set(deal.id, p.id);
+        }
         if (gem) {
           gemCount++;
           console.log(`  GEM 💎 ${gem.artist} – ${gem.title}  first copy for sale at ${gem.currency} ${gem.lowest} (was 0 for sale)`);
@@ -153,21 +182,19 @@ async function main() {
           // not wait out the rest of a ~14-min sweep. Sent separately from the deals email so the
           // subject line screams the event. A send failure doesn't abort the sweep (the gem is
           // already saved for the dashboard); it fails the run loudly at the end instead.
-          if (mailer.enabled) {
-            try { await mailer.sendGems([gem]); console.log(`  Emailed the rare gem to ${config.email.to}.`); }
-            catch (e) { emailError = e; console.log('  Gem email FAILED:', e.message); }
-          }
-          if (telegram.enabled) {
-            try { await telegram.sendGems([gem]); console.log('  Telegram gem push sent.'); }
-            catch (e) { console.log('  Telegram gem push failed (best-effort; email is the guarded channel):', e.message); }
-          }
+          const gemIds = pending.filter((item) => item.kind === 'gem').map((item) => item.id);
+          if (gemIds.length) await deliver(gemIds, true);
         }
         checked++;
-      } catch (e) { console.log(`  release ${rel.releaseId} error: ${e.message}`); }
+      } catch (e) {
+        failed++;
+        if (failureSamples.length < 3) failureSamples.push(`${rel.releaseId}: ${e.message}`);
+        console.log(`  release ${rel.releaseId} error: ${e.message}`);
+      }
     }
 
     const coverage = take >= N ? 'Full wantlist every sweep.' : `Full wantlist covered every ~${Math.ceil(N / take)} sweeps.`;
-    console.log(`[sweep ${sweepNo}] Checked ${checked}. Deals: ${deals.length}. Rare gems: ${gemCount}. (${coverage})`);
+    console.log(`[sweep ${sweepNo}] Checked ${checked}; failed ${failed}. Deals: ${deals.length}. Rare gems: ${gemCount}. (${coverage})`);
 
     // Lead with the strongest diamond: the email subject + first card come from deals[0], so order
     // best-first (just-listed + real-sold-price + biggest discount rank highest).
@@ -175,21 +202,15 @@ async function main() {
 
     if (deals.length) {
       for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
-      if (mailer.enabled) {
-        try { await mailer.sendDeals(deals); console.log(`Emailed ${deals.length} deal(s) to ${config.email.to}.`); }
-        catch (e) { emailError = e; console.log('Email FAILED:', e.message); }
-      } else {
-        console.log('Email disabled — deals saved for the dashboard.');
-      }
-      if (telegram.enabled) {
-        try { await telegram.sendDeals(deals); console.log(`Telegram push sent (${deals.length} deal(s)).`); }
-        catch (e) { console.log('Telegram push failed (best-effort; email is the guarded channel):', e.message); }
-      }
+      const ids = deals.map((d) => dealPending.get(d.id)).filter(Boolean);
+      if (ids.length) await deliver(ids, true);
     }
 
     // Publish after every sweep so the committed files are as fresh as possible whenever the job
     // ends (the workflow commits once, after the last sweep).
     publishDeals(store, cur.wantlist);
+    const health = assessSweepHealth(slice.length, checked, failed, failureSamples);
+    if (!health.ok) { sweepError = new Error(health.message); break; }
 
     if (emailError) break; // stop sweeping — the loud non-zero exit below is the alert
     lastSweepMs = Date.now() - sweepStart;
@@ -202,7 +223,8 @@ async function main() {
   // GitHub's built-in "your workflow failed" notification reaches you. For a tool whose core output IS
   // the email, a swallowed send error means you simply stop getting deals and never find out. The
   // deals are already saved to deals.json above, so the dashboard still updates regardless.
-  if (emailError) { console.error('Exiting non-zero because a deal/gem email failed to send.'); process.exit(1); }
+  if (emailError) throw new Error(`A deal/gem email failed to send: ${emailError.message}`);
+  if (sweepError) throw sweepError;
 }
 
 // Write deals.json + gems.json (for the dashboard) + state-seed.json (durable warm-up/dedupe backup)
@@ -230,4 +252,14 @@ function publishDeals(store, wantlist) {
   catch (e) { console.log('Could not write state-seed.json:', e.message); }
 }
 
-main().catch((e) => { console.error('watch-once FAILED:', e.stack || e); process.exit(1); });
+module.exports = { main, publishDeals, assessSweepHealth };
+
+if (require.main === module && process.argv.includes('--selftest')) {
+  const assert = require('assert');
+  assert.ok(assessSweepHealth(50, 41, 9).ok, 'isolated API failures are tolerated');
+  assert.ok(!assessSweepHealth(50, 40, 10).ok, '20% failures make the workflow fail loudly');
+  assert.ok(!assessSweepHealth(2, 0, 2).ok, 'a sweep with zero successful checks is unhealthy');
+  console.log('watch-once selftest: all assertions passed');
+} else if (require.main === module) {
+  main().catch((e) => { console.error('watch-once FAILED:', e.stack || e); process.exit(1); });
+}

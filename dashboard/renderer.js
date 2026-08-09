@@ -332,25 +332,27 @@ function card(d) {
 // Opt-in (the "Show near-misses" box) and scan-only — it answers "why isn't release X showing?".
 function nearMissReason(d) {
   const ref = d.reference != null ? `${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}` : 'its reference';
+  const threshold = Number.isFinite(Number(d.scanThreshold)) ? Number(d.scanThreshold) : 0.4;
+  const thresholdPct = Math.round(threshold * 100);
   if (d.reasonCode === 'no-vgplus') {
     const cheap = d.cheapestPrice != null ? money(d.cheapestPrice, d.currency) : 'the cheapest copy';
     const g = d.cheapestGrade ? ` (${esc(gradeShort(d.cheapestGrade))})` : '';
     const seen = d.copiesSeen ? ` ${d.copiesSeen} copies for sale, none VG+.` : '';
     return `No VG+ copy for sale — cheapest is ${cheap}${g}, below VG+.${seen}`;
   }
-  // How far under the 40% bar was it? "2% short" is worth a look; "30% short" isn't — surfacing the
+  // How far under the configured bar was it? "2% short" is worth a look; "30% short" isn't — surfacing the
   // gap makes the near-miss list scannable (it's already sorted closest-first within each reason).
   const gapTxt = (eff) => {
     if (eff == null) return '';
-    const gap = Math.round((0.4 - eff) * 100);
+    const gap = Math.round((threshold - eff) * 100);
     return gap <= 0 ? '' : (gap <= 5 ? ` <b>Only ${gap}% short of the bar.</b>` : ` ${gap}% short of the bar.`);
   };
   if (d.reasonCode === 'vgplus-not-cheap') {
     const ship = d.shipping != null && d.shipping > 0 ? ` + ${money(d.shipping, d.currency)} ship` : '';
-    return `Cheapest VG+ copy is ${money(d.bestPrice, d.currency)}${ship} = <b>${pct(d.effectiveDiscount)} off</b> vs ${ref} — under the 40% scan threshold.${gapTxt(d.effectiveDiscount ?? d.discount)}`;
+    return `Cheapest VG+ copy is ${money(d.bestPrice, d.currency)}${ship} = <b>${pct(d.effectiveDiscount)} off</b> vs ${ref} — under the ${thresholdPct}% scan threshold.${gapTxt(d.effectiveDiscount ?? d.discount)}`;
   }
   if (d.reasonCode === 'unconfirmed-not-cheap') {
-    return `Couldn't read condition. Cheapest ${money(d.lowest, d.currency)} ≈ <b>${pct(d.discount)} off</b> vs ${ref} — under 40%.${gapTxt(d.discount)}`;
+    return `Couldn't read condition. Cheapest ${money(d.lowest, d.currency)} ≈ <b>${pct(d.discount)} off</b> vs ${ref} — under ${thresholdPct}%.${gapTxt(d.discount)}`;
   }
   return 'Looked cheap but didn’t qualify.';
 }

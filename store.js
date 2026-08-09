@@ -9,6 +9,7 @@
  *   deals.json        [ deal, ... ]  newest-first, capped (what the dashboard reads)
  *   gems.json         [ gem, ... ]   rare-appearance alerts (0 for sale -> first copy), newest-first
  *   rare-alerted.json { [releaseId]: { ts, numForSale } }  rare-gem dedupe/cooldown memory
+ *   pending-alerts.json [ { id, kind, payload, createdAt, lastAttemptAt?, lastError? }, ... ]
  *
  * Writes are atomic (write tmp + rename). Safe to delete the whole dir; it rebuilds.
  */
@@ -30,7 +31,20 @@ function makeStore(dir) {
   const file = (n) => path.join(dir, n);
 
   function read(name, fallback) {
-    try { return JSON.parse(fs.readFileSync(file(name), 'utf8')); } catch { return fallback; }
+    const source = file(name);
+    try { return JSON.parse(fs.readFileSync(source, 'utf8')); }
+    catch (error) {
+      if (error && error.code === 'ENOENT') return fallback;
+      let backup = null;
+      try {
+        backup = `${source}.corrupt-${Date.now()}`;
+        fs.copyFileSync(source, backup);
+      } catch { backup = null; }
+      const preserved = backup ? `; preserved at ${backup}` : '';
+      const wrapped = new Error(`Could not read ${source}${preserved}: ${error.message}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
   }
   function write(name, data) {
     const tmp = file(name + '.tmp');
@@ -45,6 +59,8 @@ function makeStore(dir) {
   const soldMedians = read('soldmedians.json', {}); // real sales-history medians (scraped locally)
   let deals = read('deals.json', []);
   let gems = read('gems.json', []);
+  let pendingAlerts = read('pending-alerts.json', []);
+  if (!Array.isArray(pendingAlerts)) pendingAlerts = [];
 
   return {
     // --- price history ---
@@ -72,6 +88,50 @@ function makeStore(dir) {
     // --- rare-gem alert memory (dedupe/cooldown for the 0 -> first-copy event) ---
     getRareAlerted(releaseId) { return rareAlerted[releaseId] || null; },
     setRareAlerted(releaseId, v) { rareAlerted[releaseId] = v; write('rare-alerted.json', rareAlerted); },
+
+    // --- persistent notification outbox ---
+    // A detection is queued before delivery. Alert-dedupe state is written only by ackPendingAlert,
+    // after at least one configured channel succeeds (or immediately in dashboard-only mode).
+    queuePendingAlert(kind, payload) {
+      if (kind !== 'deal' && kind !== 'gem') throw new Error(`unknown alert kind: ${kind}`);
+      const releaseId = payload && payload.releaseId;
+      const signature = kind === 'deal' ? `${releaseId}:${payload && payload.lowest}` : `${releaseId}:${payload && payload.id}`;
+      const id = `${kind}:${signature}`;
+      const existing = pendingAlerts.find((item) => item.id === id);
+      if (existing) return existing;
+      const item = { id, kind, payload, createdAt: Date.now(), lastAttemptAt: null, lastError: null };
+      pendingAlerts.push(item);
+      write('pending-alerts.json', pendingAlerts);
+      return item;
+    },
+    getPendingAlerts() { return pendingAlerts.slice(); },
+    hasPendingAlert(kind, releaseId) {
+      return pendingAlerts.some((item) => item.kind === kind && String(item.payload && item.payload.releaseId) === String(releaseId));
+    },
+    markPendingAttempt(id, { ts = Date.now(), error = null } = {}) {
+      const item = pendingAlerts.find((x) => x.id === id);
+      if (!item) return false;
+      item.lastAttemptAt = ts;
+      item.lastError = error;
+      write('pending-alerts.json', pendingAlerts);
+      return true;
+    },
+    ackPendingAlert(id, ts = Date.now()) {
+      const idx = pendingAlerts.findIndex((item) => item.id === id);
+      if (idx < 0) return false;
+      const item = pendingAlerts[idx];
+      const p = item.payload || {};
+      if (item.kind === 'deal') {
+        alerted[p.releaseId] = { lowest: p.lowest, ts };
+        write('alerted.json', alerted);
+      } else {
+        rareAlerted[p.releaseId] = { ts, numForSale: p.numForSale };
+        write('rare-alerted.json', rareAlerted);
+      }
+      pendingAlerts.splice(idx, 1);
+      write('pending-alerts.json', pendingAlerts);
+      return true;
+    },
 
     // --- zero-stock watch: releases whose LAST observation counted 0 copies for sale ---
     // (the rarities we're waiting on — the dashboard's "watched" list). Returns release ids as strings.
@@ -205,6 +265,10 @@ if (require.main === module && process.argv.includes('--selftest')) {
   s.setRareAlerted(100, { ts: 77, numForSale: 1 });
   s.addGem({ id: 'g1', releaseId: 100, lowest: 40 });
 
+  const pd = s.queuePendingAlert('deal', { id: 'pd1', releaseId: 700, lowest: 9, ts: 1 });
+  assert.strictEqual(s.queuePendingAlert('deal', { id: 'pd2', releaseId: 700, lowest: 9, ts: 2 }).id, pd.id, 'same aggregate deal is queued once');
+  assert.ok(s.hasPendingAlert('deal', 700), 'pending deal is discoverable by release');
+
   // Reopen from disk -> state persisted.
   s = makeStore(tmp);
   assert.strictEqual(s.getAlerted(100).lowest, 12, 'alerted persisted');
@@ -214,6 +278,13 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s.getRareAlerted(100).ts, 77, 'rare-gem alert memory persisted');
   assert.strictEqual(s.getGems()[0].id, 'g1', 'gem persisted');
   assert.strictEqual(s.countGems(), 1, 'gem count');
+  assert.strictEqual(s.getPendingAlerts().length, 1, 'pending outbox persisted');
+  assert.strictEqual(s.getAlerted(700), null, 'queueing alone does not acknowledge an alert');
+  s.markPendingAttempt(pd.id, { ts: 88, error: 'temporary' });
+  assert.strictEqual(s.getPendingAlerts()[0].lastError, 'temporary', 'delivery error is persisted for retry');
+  s.ackPendingAlert(pd.id, 99);
+  assert.strictEqual(s.getPendingAlerts().length, 0, 'ack removes an outbox item');
+  assert.strictEqual(s.getAlerted(700).lowest, 9, 'ack updates alert dedupe');
 
   // Zero-stock watch: only releases whose LAST obs counted 0 for sale.
   s.pushObservation(500, { ts: 1, lowest: null, numForSale: 0 });
@@ -276,6 +347,13 @@ if (require.main === module && process.argv.includes('--selftest')) {
   for (let i = 0; i < 20; i++) s.pushObservation(300, { ts: i, lowest: 10, numForSale: 2 });
   assert.strictEqual(s.exportSeed()[300].n, SEED_WARM, 'exported warm-up count is capped at SEED_WARM');
 
+  // Corrupt state must never be mistaken for an empty store and silently overwritten.
+  const corruptTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-corrupt-'));
+  fs.writeFileSync(path.join(corruptTmp, 'history.json'), '{not valid json');
+  assert.throws(() => makeStore(corruptTmp), /Could not read .*history\.json/, 'corrupt state fails loudly');
+  assert.ok(fs.readdirSync(corruptTmp).some((name) => name.startsWith('history.json.corrupt-')), 'corrupt state is preserved for recovery');
+
+  fs.rmSync(corruptTmp, { recursive: true, force: true });
   fs.rmSync(tmp2, { recursive: true, force: true });
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log('store selftest: all assertions passed');

@@ -15,6 +15,11 @@
 
 const http = require('http');
 
+function isLoopback(address) {
+  const value = String(address || '').toLowerCase();
+  return value === '::1' || value === '127.0.0.1' || value.startsWith('127.') || value.startsWith('::ffff:127.');
+}
+
 function makeServer({ store, getStatus, token, getZeroWatch }) {
   const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,6 +35,9 @@ function makeServer({ store, getStatus, token, getZeroWatch }) {
     if (token) {
       const provided = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
       if (provided !== token) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end('{"error":"unauthorized"}'); }
+    } else if (!isLoopback(req.socket.remoteAddress)) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      return res.end('{"error":"DASHBOARD_TOKEN is required for remote access"}');
     }
 
     const json = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -50,4 +58,29 @@ function makeServer({ store, getStatus, token, getZeroWatch }) {
   return server;
 }
 
-module.exports = { makeServer };
+module.exports = { makeServer, isLoopback };
+
+if (require.main === module && process.argv.includes('--selftest')) {
+  const assert = require('assert');
+  (async () => {
+    assert.ok(isLoopback('127.0.0.1'));
+    assert.ok(isLoopback('::1'));
+    assert.ok(isLoopback('::ffff:127.0.0.1'));
+    assert.ok(!isLoopback('192.168.1.2'));
+
+    const store = { getDeals: () => [{ id: 'local' }], getGems: () => [] };
+    const server = makeServer({ store, getStatus: () => ({ ok: true }), token: '', getZeroWatch: () => [] });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/api/deals`);
+      assert.strictEqual(response.status, 200, 'tokenless API remains usable on localhost');
+      assert.strictEqual((await response.json())[0].id, 'local');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    console.log('server selftest: all assertions passed');
+  })().catch((error) => { console.error('FAILED:', error.stack || error); process.exit(1); });
+}

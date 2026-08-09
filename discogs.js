@@ -25,7 +25,7 @@ function makeClient(opts = {}) {
   const fetchImpl = opts.fetch || globalThis.fetch;
   const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   // Conservative floor between calls so we never trip the per-minute cap.
-  const minIntervalMs = opts.minIntervalMs || (token ? 1100 : 2500);
+  const minIntervalMs = opts.minIntervalMs ?? (token ? 1100 : 2500);
 
   let lastAt = 0;
   let remaining = null; // last seen X-Discogs-Ratelimit-Remaining
@@ -162,7 +162,8 @@ if (require.main === module && process.argv.includes('--selftest')) {
       if (u.pathname.includes('/marketplace/stats/')) return json({ num_for_sale: 115, lowest_price: { value: 0.57, currency: 'EUR' }, blocked_from_sale: false });
       return json({});
     };
-    const c = makeClient({ token: 'TESTTOKEN', fetch: fakeFetch, sleep: async () => {}, minIntervalMs: 0 });
+    let sleeps = 0;
+    const c = makeClient({ token: 'TESTTOKEN', fetch: fakeFetch, sleep: async () => { sleeps++; }, minIntervalMs: 0 });
 
     const wl = await c.getWantlist('someone');
     assert.strictEqual(wl.length, 2, 'wantlist paginates across 2 pages');
@@ -175,6 +176,7 @@ if (require.main === module && process.argv.includes('--selftest')) {
 
     // token present -> Authorization header set
     assert.ok(calls.every((x) => x.init.headers.Authorization === 'Discogs token=TESTTOKEN'), 'token header sent');
+    assert.strictEqual(sleeps, 0, 'an explicit zero interval disables throttling (useful for tests)');
 
     console.log('discogs selftest: all assertions passed');
   })().catch((e) => { console.error('FAILED:', e.stack || e); process.exit(1); });

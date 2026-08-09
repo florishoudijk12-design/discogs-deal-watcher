@@ -48,14 +48,24 @@ async function main() {
   console.log(`\n[2] REAL marketplace data  —  GET /marketplace/stats/{id}`);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-e2e-'));
   const store = makeStore(tmp);
-  const config = { ...require('./watcher').DEFAULTS, token: '', currency: 'EUR', minDiscount: 0.5 };
+  // Keep this transport test independent of changing production noise filters: its job is to prove
+  // the whole chain, while engine/watcher selftests cover those profiles separately.
+  const config = {
+    ...require('./watcher').DEFAULTS,
+    token: '',
+    currency: 'EUR',
+    minDiscount: 0.5,
+    minReference: 0,
+    shippingEstimate: 0,
+    mode: 'sensitive',
+  };
 
   const deals = [];
   for (const rel of releases) {
     // Seed a simulated baseline history so a reference exists without a token.
     for (let i = 0; i < 6; i++) store.pushObservation(rel.releaseId, { ts: Date.now() - (i + 1) * 86400000, lowest: SEED_BASELINE, numForSale: 5 });
     const before = store.trailingMedianLowest(rel.releaseId);
-    const deal = await processRelease(rel, { client, store, engine, config });
+    const { deal } = await processRelease(rel, { client, store, engine, config });
     const live = (store.trailingMedianLowest(rel.releaseId)); // includes the just-pushed real low
     const obs = store.getDeals(1); // not reliable; print from stats instead
     const histLast = JSON.parse(fs.readFileSync(path.join(tmp, 'history.json'), 'utf8'))[rel.releaseId].slice(-1)[0];
@@ -65,7 +75,10 @@ async function main() {
   }
 
   console.log(`\n[3] Detection result: ${deals.length} deal(s) from real prices.`);
-  if (!deals.length) { console.log('   No deal fired — try a lower SEED_BASELINE or another release.'); fs.rmSync(tmp, { recursive: true, force: true }); return; }
+  if (!deals.length) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    throw new Error('No deal fired from the seeded e2e reference; the detection fixture needs updating.');
+  }
 
   console.log(`\n[4] REAL email delivery via throwaway Ethereal SMTP (no account needed)...`);
   const acct = await nodemailer.createTestAccount();

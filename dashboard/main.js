@@ -19,6 +19,7 @@ const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
+const { scanMinDiscount, parseMoney, evaluateScanPreliminary } = require('./scan-policy');
 
 // Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
 //   • dev run  — one level up, in the project checkout.
@@ -90,7 +91,9 @@ async function autoPushSoldMedians() {
     // `diff --cached --quiet` exits 0 when nothing is staged (file unchanged) -> nothing to push.
     try { await git(['diff', '--cached', '--quiet', '--', 'soldmedians.json']); return { ok: true, pushed: false, reason: 'unchanged' }; }
     catch { /* non-zero exit = there IS a staged change -> continue committing */ }
-    await git(['commit', '-m', 'Auto: refresh sold-medians from dashboard scan']);
+    // Commit only this file. `git commit` without a path would also include unrelated changes the
+    // user happened to have staged in this checkout.
+    await git(['commit', '--only', '-m', 'Auto: refresh sold-medians from dashboard scan', '--', 'soldmedians.json']);
     // Integrate the cloud bot's deals.json commits first, or the push is rejected (non-fast-forward).
     await git(['pull', '--rebase', '--autostash', 'origin', 'main'], 90_000);
     await git(['push', 'origin', 'main'], 60_000);
@@ -311,7 +314,6 @@ function loadWatcher() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DISCOGS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-const parseMoney = (s) => { if (s == null) return null; const n = parseFloat(String(s).replace(/[^\d.]/g, '')); return Number.isFinite(n) ? n : null; };
 
 // In-page extractor: pull the "Last Sold / Low / Median / High" sales-history block off the
 // release page. Discogs renders it in plain text once Cloudflare clears (verified live).
@@ -634,6 +636,7 @@ async function runScrape(win, opts = {}) {
     if (!config.username) throw new Error('No Discogs username configured — open Settings → Discogs account.');
 
     const store = makeStore(stateDir());
+    const scanThreshold = scanMinDiscount(config);
     // Slightly tighter pacing than the cloud default (1100ms) for this interactive scan: 1050ms is
     // ~57 req/min — under Discogs' 60/min cap AND clear of the client's near-empty-window guard (which
     // would 60s-stall if `remaining` hit 1), so it shaves ~30-40s off a full sweep without risking a
@@ -720,6 +723,7 @@ async function runScrape(win, opts = {}) {
         numForSale: c.stats.numForSale,
         soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
         freshListing: c.freshListing,
+        scanThreshold,
         // Recent lowest-price trail (oldest -> newest) for the dashboard sparkline.
         spark: store.getHistory(c.rel.releaseId).slice(-12).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0),
         releaseUrl: engine.releaseUrl(c.rel.releaseId), ts: Date.now(),
@@ -747,13 +751,13 @@ async function runScrape(win, opts = {}) {
           suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
           trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
           prevAlertedLowest: null,
-        }, { minDiscount: 0.4, shippingEstimate: best.shipping != null ? best.shipping : config.shippingEstimate });
+        }, { minDiscount: scanThreshold, shippingEstimate: best.shipping != null ? best.shipping : config.shippingEstimate });
         if (sig.meetsThreshold) {
           const cur = best.currency || c.stats.currency || config.currency;
           const cheaperWorn = pick.cheapestAny && pick.cheapestAny.itemId !== best.itemId
             && (pick.cheapestAny.total ?? pick.cheapestAny.price) < (best.total ?? best.price);
           // A: how many VG+ copies are ALL cheap vs the reference (a cluster = real price drop, not a fluke).
-          const cluster = engine.cheapCluster(pick.acceptable, sig.reference, 0.4);
+          const cluster = engine.cheapCluster(pick.acceptable, sig.reference, scanThreshold);
           // B: a slightly-dearer-but-better-grade copy to offer as an alternative.
           const alt = pick.betterAlt;
           deals.push({
@@ -794,7 +798,7 @@ async function runScrape(win, opts = {}) {
           suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
           trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
           prevAlertedLowest: null,
-        }, { minDiscount: 0.4 });
+        }, { minDiscount: scanThreshold, shippingEstimate: config.shippingEstimate });
         if (sig.meetsThreshold) {
           deals.push({
             ...common,
@@ -932,18 +936,16 @@ async function runScrape(win, opts = {}) {
 
         if (stats.numForSale > 0 && stats.lowestPrice != null) {
           let sug = store.getSuggestion(rel.releaseId);
-          if (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
+          const suggestionComplete = sug && Object.prototype.hasOwnProperty.call(sug, 'ladder');
+          if (!suggestionComplete || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
             try {
               const raw = await client.getPriceSuggestions(rel.releaseId);
-              if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) }; store.setSuggestion(rel.releaseId, sug); }
+              if (raw) sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) };
+              else sug = { ts: Date.now(), vgplus: null, vg: null, ladder: null, unavailable: true };
+              store.setSuggestion(rel.releaseId, sug);
             } catch { /* no suggestion -> trailing-median fallback */ }
           }
-          const prelim = engine.evaluateMarketSignal({
-            lowest: stats.lowestPrice,
-            suggestion: sug ? sug.vgplus : null, suggestionLow: sug ? sug.vg : null, ladder: sug ? sug.ladder : null,
-            trailingMedian: store.trailingMedianLowest(rel.releaseId, config.trailingN),
-            prevAlertedLowest: null,
-          }, { minDiscount: 0.4 });
+          const prelim = evaluateScanPreliminary({ engine, store, rel, stats, suggestion: sug, config });
           if (prelim.meetsThreshold) {
             queue.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs) });
             candidateCount++;
@@ -1236,6 +1238,24 @@ async function encryptSecret(publicKeyB64, value) {
   return sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL);
 }
 
+async function findExistingFork(githubToken, login) {
+  const configured = (readSettings().githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+  const candidates = [...new Set([configured, `${login}/discogs-deal-watcher`].filter(Boolean))];
+  for (const candidate of candidates) {
+    const response = await ghReq(githubToken, 'GET', `/repos/${candidate}`);
+    const repo = response.data;
+    if (response.status === 200 && repo && repo.fork && repo.parent && String(repo.parent.full_name).toLowerCase() === UPSTREAM_REPO.toLowerCase()) {
+      return repo.full_name;
+    }
+  }
+  const forks = await ghReq(githubToken, 'GET', `/repos/${UPSTREAM_REPO}/forks?per_page=100`);
+  if (forks.status === 200 && Array.isArray(forks.data)) {
+    const own = forks.data.find((repo) => repo && repo.owner && String(repo.owner.login).toLowerCase() === String(login).toLowerCase());
+    if (own && own.full_name) return own.full_name;
+  }
+  return null;
+}
+
 let cloudSetupRunning = false;
 async function setupCloud(win, { githubToken, mailTo, resendKey } = {}) {
   if (cloudSetupRunning) throw new Error('Cloud setup is already running.');
@@ -1264,15 +1284,23 @@ async function setupCloud(win, { githubToken, mailTo, resendKey } = {}) {
     } finally { rkTo.done(); }
     step('verify', 'ok', 'GitHub: ' + login);
 
-    // 2. Fork. POST /forks is idempotent — if the fork already exists GitHub returns it, so
-    // re-running the wizard (after a half-finished attempt) just continues where it left off.
+    // 2. Fork. Reuse an existing fork before POSTing: GitHub's create-fork endpoint itself is not
+    // reliably idempotent and may return 422 on a resumed, half-finished setup.
     step('fork', 'busy');
-    const fk = await ghReq(githubToken, 'POST', `/repos/${UPSTREAM_REPO}/forks`, { default_branch_only: true });
-    if (fk.status !== 202 && fk.status !== 200) {
-      const msg = fk.data && fk.data.message ? ' — ' + fk.data.message : '';
-      throw new Error('Could not create your copy of the watcher repo (HTTP ' + fk.status + msg + ').');
+    let fork = await findExistingFork(githubToken, login);
+    if (!fork) {
+      const fk = await ghReq(githubToken, 'POST', `/repos/${UPSTREAM_REPO}/forks`, { default_branch_only: true });
+      if (fk.status === 202 || fk.status === 200) fork = fk.data && fk.data.full_name;
+      else {
+        await sleep(2000);
+        fork = await findExistingFork(githubToken, login);
+        if (!fork) {
+          const msg = fk.data && fk.data.message ? ' — ' + fk.data.message : '';
+          throw new Error('Could not create your copy of the watcher repo (HTTP ' + fk.status + msg + ').');
+        }
+      }
     }
-    const fork = fk.data.full_name; // usually <login>/discogs-deal-watcher; GitHub may suffix on a name clash
+    if (!fork) throw new Error('GitHub did not return the name of your watcher repository.');
     // Forking is async on GitHub's side — poll until the repo actually answers.
     let ready = false;
     for (let i = 0; i < 30 && !ready; i++) {

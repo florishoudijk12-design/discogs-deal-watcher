@@ -87,10 +87,12 @@ jobs:
           git commit -m "deals update [skip ci]" || echo "no changes"
           # A budgeted run holds this checkout for ~an hour, so the owner (or the dashboard's
           # medians auto-push) may well have pushed to main meanwhile — rebase first or the push is
-          # rejected and the publish silently lost (seen live 2026-07-05). The bot only ever touches
+          # rejected and the publish is lost (seen live 2026-07-05). The bot only ever touches
           # deals/gems/state-seed; owner pushes touch other files, so the rebase never conflicts.
-          git pull --rebase --autostash origin main || echo "rebase failed (will retry next run)"
-          git push || echo "nothing to push"
+          # Pull/push failures must fail the job: a green run must mean the dashboard files were
+          # actually published. `git commit` above already handles the legitimate no-change case.
+          git pull --rebase --autostash origin main
+          git push
 
       # Keep the cron alive: GitHub disables scheduled workflows after 60 days with no *user* activity.
       #

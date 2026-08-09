@@ -5,14 +5,16 @@
   "description": "Watches your Discogs wantlist and alerts you when a copy is offered far under its median price.",
   "main": "watcher.js",
   "scripts": {
-    "selftest": "node engine.js --selftest && node discogs.js --selftest && node store.js --selftest && node mailer.js --selftest && node telegram.js --selftest && node watcher.js --itest",
+    "selftest": "node engine.js --selftest && node discogs.js --selftest && node store.js --selftest && node mailer.js --selftest && node telegram.js --selftest && node delivery.js --selftest && node server.js --selftest && node dashboard/scan-policy.js --selftest && node watcher.js --itest && node watch-once.js --selftest",
     "e2e": "node live-e2e.cjs",
     "once": "node watch-once.js",
     "watch": "node watcher.js",
     "start": "node watcher.js"
   },
   "dependencies": {
-    "nodemailer": "^6.9.14"
+    "nodemailer": "^9.0.5"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

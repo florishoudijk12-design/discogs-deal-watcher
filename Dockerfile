@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-COPY engine.js discogs.js store.js mailer.js server.js watcher.js ./
+COPY engine.js discogs.js store.js mailer.js telegram.js delivery.js server.js watcher.js ./
 
 # Persist the rolling history / alert memory / deals across restarts (mount a volume here).
 VOLUME /app/state

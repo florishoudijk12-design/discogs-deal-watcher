@@ -20,6 +20,7 @@
     },
     "files": [
       "main.js",
+      "scan-policy.js",
       "preload.js",
       "renderer.js",
       "index.html",
@@ -38,6 +39,26 @@
       {
         "from": "../store.js",
         "to": "watcher/store.js"
+      },
+      {
+        "from": "../mailer.js",
+        "to": "watcher/mailer.js"
+      },
+      {
+        "from": "../telegram.js",
+        "to": "watcher/telegram.js"
+      },
+      {
+        "from": "../delivery.js",
+        "to": "watcher/delivery.js"
+      },
+      {
+        "from": "../server.js",
+        "to": "watcher/server.js"
+      },
+      {
+        "from": "node_modules/nodemailer",
+        "to": "watcher/node_modules/nodemailer"
       },
       {
         "from": "../watcher.js",
@@ -81,10 +102,11 @@
     }
   },
   "devDependencies": {
-    "electron": "^31.0.0",
+    "electron": "^43.3.0",
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
-    "libsodium-wrappers": "^0.8.4"
+    "libsodium-wrappers": "^0.8.4",
+    "nodemailer": "^9.0.5"
   }
 }
