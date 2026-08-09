@@ -214,8 +214,8 @@ In the dashboard's ⚙ Settings, pick source **Live server**, set URL = `http://
 Set-Location dashboard
 npm install
 npm start                 # dev
-npm run build             # -> dist\Discogs-Deal-Watcher-Setup-<version>.exe
-npm run build:mac         # -> dist/Discogs-Deal-Watcher-<version>-mac.dmg (run on macOS)
+npm run build             # -> dist\Discogs-Deal-Shark-Setup-<version>.exe
+npm run build:mac         # -> dist/Discogs-Deal-Shark-<version>-mac.dmg (run on macOS)
 ```
 
 **Works on first launch — no setup.** It ships pointed at the public repo
