@@ -2,6 +2,11 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - deals.json
+      - gems.json
+      - soldmedians.json
+      - state-seed.json
   pull_request:
   workflow_dispatch:
 
