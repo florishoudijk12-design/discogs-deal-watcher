@@ -18,6 +18,16 @@ contextBridge.exposeInMainWorld('api', {
   scrapeRun: (opts) => ipcRenderer.invoke('scrape:run', opts),
   scrapeCancel: () => ipcRenderer.invoke('scrape:cancel'),
   scrapeLast: () => ipcRenderer.invoke('scrape:last'),
+  // Scout: discover valuable vinyl outside the current wantlist by Discogs genre/style.
+  scoutRun: (opts) => ipcRenderer.invoke('scout:run', opts),
+  scoutCancel: () => ipcRenderer.invoke('scout:cancel'),
+  scoutLast: () => ipcRenderer.invoke('scout:last'),
+  scoutAddWant: (releaseId) => ipcRenderer.invoke('scout:addWant', releaseId),
+  onScoutProgress: (cb) => {
+    const h = (_e, m) => cb(m);
+    ipcRenderer.on('scout:progress', h);
+    return () => ipcRenderer.removeListener('scout:progress', h);
+  },
   // Sold-medians git push: last persisted outcome (null = badge hidden) + a manual retry.
   getPushStatus: () => ipcRenderer.invoke('medians:pushStatus'),
   retryPush: () => ipcRenderer.invoke('medians:retryPush'),

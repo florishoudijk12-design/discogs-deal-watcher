@@ -25,6 +25,7 @@
       "median-publisher.js",
       "runtime-policy.js",
       "listing-history.js",
+      "scout-policy.js",
       "preload.js",
       "renderer.js",
       "index.html",

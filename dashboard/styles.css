@@ -224,6 +224,7 @@ button.pill { width: 100%; text-align: left; cursor: pointer; }
 .tab-icon { font-size: 14px; line-height: 1; }
 .deal-icon { color: var(--green); }
 .gem-icon { color: var(--gem); font-size: 12px; }
+.scout-icon { color: var(--accent); font-size: 15px; }
 .tab-badge { min-width: 21px; padding: 2px 6px; border-radius: 999px; color: #21142f; background: var(--gem); font-size: 10px; font-weight: 850; text-align: center; }
 
 .view-header {
@@ -236,6 +237,7 @@ button.pill { width: 100%; text-align: left; cursor: pointer; }
 .view-heading { min-width: 0; }
 .eyebrow { display: block; margin-bottom: 7px; color: var(--green); font-size: 9.5px; font-weight: 850; letter-spacing: .16em; }
 body.tab-gems .eyebrow { color: var(--gem); }
+body.tab-scout .eyebrow { color: var(--accent); }
 .view-heading h2 { margin: 0; font-size: clamp(22px, 2.4vw, 29px); line-height: 1.12; letter-spacing: -.025em; font-weight: 760; }
 .view-heading p { max-width: 650px; margin: 7px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .result-count { color: var(--muted); font-size: 11.5px; white-space: nowrap; padding-bottom: 3px; }
@@ -320,7 +322,51 @@ body.tab-gems .eyebrow { color: var(--gem); }
 .switch-row input:checked + span::after { transform: translateX(10px); background: var(--green-bright); }
 .switch-row b { font-size: 10.5px; font-weight: 650; }
 
-body.tab-gems #rule-summary, body.tab-gems #btn-filter-toggle, body.tab-gems #filter-panel { display: none !important; }
+body.tab-gems #rule-summary, body.tab-gems #btn-filter-toggle, body.tab-gems #filter-panel,
+body.tab-scout .discovery-bar, body.tab-scout #filter-panel { display: none !important; }
+
+/* Scout: deliberately separate from deal filtering. This searches the database beyond the wantlist. */
+.scout-panel {
+  margin: 0 22px;
+  padding: 15px;
+  border: 1px solid #284566;
+  border-radius: 15px;
+  background: linear-gradient(135deg, rgba(35,67,102,.35), rgba(15,24,34,.95));
+  box-shadow: var(--shadow);
+  flex: 0 0 auto;
+}
+.scout-controls { display: grid; grid-template-columns: 130px minmax(200px, 1fr) 145px 145px auto; gap: 10px; align-items: end; }
+.scout-controls label { min-width: 0; color: var(--muted); font-size: 9.5px; font-weight: 700; }
+.scout-controls label > span { display: block; margin: 0 0 6px 2px; text-transform: uppercase; letter-spacing: .08em; }
+.scout-controls input, .scout-controls select {
+  width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px;
+  outline: 0; color: var(--text); background: #0a1117; font-size: 11.5px;
+}
+.scout-controls input:focus, .scout-controls select:focus { border-color: #3d6fa5; box-shadow: 0 0 0 3px rgba(112,165,255,.08); }
+.money-input { display: flex; align-items: center; height: 38px; border: 1px solid var(--line); border-radius: 9px; background: #0a1117; overflow: hidden; }
+.money-input:focus-within { border-color: #3d6fa5; box-shadow: 0 0 0 3px rgba(112,165,255,.08); }
+.money-input b { padding-left: 10px; color: var(--muted); font-size: 12px; }
+.money-input input { height: 36px; border: 0; box-shadow: none !important; }
+.scout-run { height: 38px; white-space: nowrap; background: #3b70ad; }
+.scout-run:hover { background: #4b83c2; }
+.scout-run:disabled, .scout-controls input:disabled, .scout-controls select:disabled { opacity: .55; cursor: default; }
+.scout-explainer { margin-top: 10px; color: var(--muted-2); font-size: 9.8px; line-height: 1.45; }
+.scout-progress { margin-top: 12px; display: grid; grid-template-columns: minmax(120px, 220px) 1fr auto; align-items: center; gap: 12px; }
+.scout-progress > span { min-width: 0; color: #c5d2dd; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scout-progress .scanbar-fill { background: linear-gradient(90deg, #477fc9, #8ab8f2); }
+
+.card.is-scout { border-color: #284766; }
+.card.is-scout:hover { border-color: #4676a5; }
+.card.is-scout .price { color: #88b9f3; }
+.card .scout-value-label { color: var(--muted); font-size: 10px; }
+.tag.scout-rare { color: #cdb9ff; border-color: #634b8c; }
+.tag.scout-demand { color: #9fc8f5; border-color: #315c83; }
+.card .scout-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+.card .scout-actions .buy { margin-top: 0; background: #315f91; }
+.card .scout-actions .buy:hover { background: #437bb2; }
+.card .scout-actions .want-add { padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: transparent; font-size: 10.5px; font-weight: 700; cursor: pointer; }
+.card .scout-actions .want-add:hover { border-color: #2c704e; color: var(--green); background: rgba(42,199,120,.06); }
+.card .scout-actions .want-add:disabled { color: var(--green); border-color: #285f44; cursor: default; opacity: .85; }
 
 /* Result grid */
 .deals {
@@ -462,6 +508,8 @@ button.ghost:hover { background: var(--panel-2); }
   .brand-copy > span { display: none; }
   .rule-summary span:nth-child(2) { display: none; }
   .filter-grid { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
+  .scout-controls { grid-template-columns: 120px minmax(180px, 1fr) 125px 130px; }
+  .scout-run { grid-column: 1 / -1; }
 }
 @media (max-width: 700px) {
   .topbar { padding-inline: 14px; }
@@ -470,8 +518,12 @@ button.ghost:hover { background: var(--panel-2); }
   .actions button.scan { min-width: 42px; width: 42px; padding: 0; }
   .actions button.scan span { display: none; }
   .view-header { padding-inline: 16px; }
-  .tabs, .discovery-bar, .filters { margin-left: 14px; margin-right: 14px; }
+  .tabs, .discovery-bar, .filters, .scout-panel { margin-left: 14px; margin-right: 14px; }
   .rule-summary { display: none; }
   .filter-grid { grid-template-columns: repeat(2, minmax(135px, 1fr)); }
   .deals { grid-template-columns: 1fr; padding-inline: 14px; }
+  .scout-controls { grid-template-columns: 1fr 1fr; }
+  .scout-query { grid-column: 1 / -1; }
+  .scout-progress { grid-template-columns: 1fr auto; }
+  .scout-progress .scanbar-track { grid-column: 1 / -1; }
 }

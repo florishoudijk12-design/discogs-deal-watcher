@@ -23,6 +23,7 @@ const { filterRealMedians } = require('./git-policy');
 const { makeMedianPublisher } = require('./median-publisher');
 const { dedupeGems, cloudBusyFromRun, estimateScanEta } = require('./runtime-policy');
 const { makeListingHistory } = require('./listing-history');
+const { normalizeScoutOptions, normalizeSearchResult, suggestionSnapshot, scoutScore, sortScoutResults } = require('./scout-policy');
 
 // Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
 //   • dev run  — one level up, in the project checkout.
@@ -348,6 +349,8 @@ async function cloudScanActive() {
 // lowest). No email, no warm-up, no new-low dedupe. Cancellable; emits progress to the renderer.
 let scrapeAbort = false;
 let scrapeRunning = false;
+let scoutAbort = false;
+let scoutRunning = false;
 const SUGGESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RARE_COOLDOWN_MS = 12 * 60 * 60 * 1000; // per-release cooldown between rare-gem alerts (mirrors the cloud watcher)
 const QUICK_SCAN_SIZE = 250; // a quick scan checks only the top-N highest-priority releases (by watch-score)
@@ -695,6 +698,7 @@ function startDiscogsLogin() {
 
 async function runScrape(win, opts = {}) {
   if (scrapeRunning) throw new Error('A scan is already running.');
+  if (scoutRunning) throw new Error('A Scout scan is already running. Stop it before scanning your wantlist.');
   // Shared-budget guard: never sweep while the cloud scan is sweeping (see cloudScanActive above) —
   // the caller (renderer) shows why and retries once the cloud run is done.
   const cloudBusy = await cloudScanActive();
@@ -1165,6 +1169,155 @@ async function runScrape(win, opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Scout — discover valuable vinyl outside the user's wantlist by genre/style.
+// ---------------------------------------------------------------------------
+// Database search itself has no price sort. We therefore inspect a bounded number of concrete
+// vinyl releases, read Discogs's VG+ price suggestion (or a fresh real sold-median already in our
+// cache), and only then fetch marketplace availability for releases above the chosen value floor.
+// This stays honest about the signal and avoids spending two API calls on every cheap release.
+const LAST_SCOUT_FILE = () => path.join(app.getPath('userData'), 'last-scout.json');
+
+function lastScout() {
+  try {
+    const value = JSON.parse(fs.readFileSync(LAST_SCOUT_FILE(), 'utf8'));
+    return value && Array.isArray(value.results) ? value : null;
+  } catch { return null; }
+}
+
+async function runScout(win, rawOpts = {}) {
+  if (scoutRunning) throw new Error('A Scout scan is already running.');
+  if (scrapeRunning) throw new Error('Your wantlist scan is already running. Wait for it to finish first.');
+  const opts = normalizeScoutOptions(rawOpts);
+  scoutRunning = true;
+  scoutAbort = false;
+  const send = (message) => { try { win.webContents.send('scout:progress', message); } catch { /* window gone */ } };
+
+  try {
+    const cloudBusy = await cloudScanActive();
+    if (cloudBusy) return { postponed: true, cloudBusy };
+    const { makeClient, makeStore, loadConfig } = loadWatcher();
+    const config = loadConfig(configPath());
+    if (!config.token) throw new Error('No Discogs token configured — open Settings → Discogs account.');
+    if (!config.username) throw new Error('No Discogs username configured — open Settings → Discogs account.');
+    if (['EUR', 'USD', 'GBP'].includes(String(config.currency || '').toUpperCase())) opts.currency = String(config.currency).toUpperCase();
+
+    const client = makeClient({ token: config.token, userAgent: config.userAgent, minIntervalMs: 1100 });
+    const store = makeStore(stateDir());
+    send({ phase: 'wantlist', checked: 0, total: 0, found: 0 });
+    const wanted = new Set((await client.getWantlist(config.username)).map((release) => Number(release.releaseId)));
+
+    const discovered = [];
+    const seenReleases = new Set();
+    let excludedWantlist = 0;
+    let inspected = 0;
+    let page = 1;
+    let pages = 1;
+    send({ phase: 'search', checked: 0, total: opts.limit, found: 0, query: opts.query });
+    while (!scoutAbort && inspected < opts.limit && page <= pages) {
+      const perPage = Math.min(100, opts.limit - inspected);
+      const found = await client.searchReleases({
+        field: opts.field,
+        query: opts.query,
+        format: opts.format,
+        page,
+        perPage,
+      });
+      pages = Math.max(1, Number(found.pagination?.pages) || 1);
+      const batch = (found.results || []).slice(0, perPage);
+      inspected += batch.length;
+      for (const raw of batch) {
+        const release = normalizeSearchResult(raw);
+        if (!Number.isFinite(release.releaseId) || release.releaseId <= 0 || seenReleases.has(release.releaseId)) continue;
+        seenReleases.add(release.releaseId);
+        if (wanted.has(release.releaseId)) { excludedWantlist += 1; continue; }
+        discovered.push(release);
+      }
+      send({ phase: 'search', checked: inspected, total: opts.limit, found: discovered.length, query: opts.query });
+      if (!batch.length) break;
+      page += 1;
+    }
+
+    const results = [];
+    let checked = 0;
+    const soldFreshMs = 30 * 24 * 60 * 60 * 1000;
+    for (const release of discovered) {
+      if (scoutAbort) break;
+      checked += 1;
+      let suggestion = store.getSuggestion(release.releaseId);
+      if (!suggestion || !suggestion.ts || Date.now() - suggestion.ts >= SUGGESTION_TTL_MS) {
+        try {
+          const raw = await client.getPriceSuggestions(release.releaseId);
+          const snapshot = suggestionSnapshot(raw);
+          suggestion = { ts: Date.now(), ...snapshot, unavailable: snapshot.vgplus == null };
+          store.setSuggestion(release.releaseId, suggestion);
+        } catch (error) {
+          if (error && error.status === 401) throw error;
+          suggestion = null;
+        }
+      }
+
+      const sold = store.getSoldMedian(release.releaseId);
+      const freshSold = sold && sold.median != null && sold.ts && Date.now() - sold.ts < soldFreshMs ? sold : null;
+      const estimatedValue = freshSold ? Number(freshSold.median) : Number(suggestion && suggestion.vgplus);
+      if (!Number.isFinite(estimatedValue) || estimatedValue < opts.minValue) {
+        send({ phase: 'pricing', checked, total: discovered.length, found: results.length });
+        continue;
+      }
+
+      let stats = { numForSale: null, lowestPrice: null, currency: opts.currency, blocked: false };
+      try { stats = await client.getMarketplaceStats(release.releaseId, opts.currency); }
+      catch { /* value candidate remains useful even if live availability failed */ }
+      const item = {
+        ...release,
+        estimatedValue,
+        valueSource: freshSold ? 'sold-median' : 'suggestion',
+        currency: (freshSold && freshSold.currency) || (suggestion && suggestion.currency) || stats.currency || opts.currency,
+        numForSale: stats.numForSale,
+        lowestPrice: stats.lowestPrice,
+        blocked: !!stats.blocked,
+        releaseUrl: `https://www.discogs.com/release/${release.releaseId}`,
+        marketplaceUrl: `https://www.discogs.com/sell/release/${release.releaseId}?sort=price%2Casc&currency=${encodeURIComponent(opts.currency)}`,
+      };
+      item.score = scoutScore(item);
+      results.push(item);
+      send({ phase: 'pricing', checked, total: discovered.length, found: results.length });
+    }
+
+    const output = {
+      ts: Date.now(),
+      query: opts,
+      inspected,
+      candidates: discovered.length,
+      excludedWantlist,
+      aborted: scoutAbort,
+      results: sortScoutResults(results),
+    };
+    try { fs.writeFileSync(LAST_SCOUT_FILE(), JSON.stringify(output, null, 2)); } catch { /* persistence is best effort */ }
+    send({ phase: 'done', checked, total: discovered.length, found: output.results.length, aborted: scoutAbort });
+    return output;
+  } finally {
+    scoutRunning = false;
+  }
+}
+
+async function addScoutWant(releaseId) {
+  const id = Number(releaseId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid Discogs release id.');
+  if (scrapeRunning || scoutRunning) throw new Error('Wait for the active scan to finish first.');
+  const { makeClient, loadConfig } = loadWatcher();
+  const config = loadConfig(configPath());
+  if (!config.token || !config.username) throw new Error('Set up your Discogs account first.');
+  const client = makeClient({ token: config.token, userAgent: config.userAgent, minIntervalMs: 1100 });
+  await client.addToWantlist(config.username, id);
+  const saved = lastScout();
+  if (saved) {
+    saved.results = saved.results.map((item) => Number(item.releaseId) === id ? { ...item, addedToWantlist: true } : item);
+    try { fs.writeFileSync(LAST_SCOUT_FILE(), JSON.stringify(saved, null, 2)); } catch { /* best effort */ }
+  }
+  return { ok: true, releaseId: id };
+}
+
 function lastScan() {
   try { return JSON.parse(fs.readFileSync(LAST_SCAN_FILE(), 'utf8')); } catch { return null; }
 }
@@ -1320,6 +1473,10 @@ ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContent
 ipcMain.handle('verify:run', (e, items) => runVerify(BrowserWindow.fromWebContents(e.sender), items || []));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });
 ipcMain.handle('scrape:last', () => lastScan());
+ipcMain.handle('scout:run', (e, opts) => runScout(BrowserWindow.fromWebContents(e.sender), opts || {}));
+ipcMain.handle('scout:cancel', () => { scoutAbort = true; return true; });
+ipcMain.handle('scout:last', () => lastScout());
+ipcMain.handle('scout:addWant', (_e, releaseId) => addScoutWant(releaseId));
 ipcMain.handle('discogs:loginStatus', () => isDiscogsLoggedIn());
 ipcMain.handle('discogs:login', () => startDiscogsLogin());
 // Medians push status — null hides the badge (packaged installs never push: there's no repo; and
@@ -1635,6 +1792,8 @@ function createWindow() {
   // lock, and the next launch makes IT crash with "Object has been destroyed".
   win.on('closed', () => {
     mainWindow = null;
+    scrapeAbort = true;
+    scoutAbort = true;
     if (process.platform !== 'darwin') app.quit();
   });
   win.removeMenu();

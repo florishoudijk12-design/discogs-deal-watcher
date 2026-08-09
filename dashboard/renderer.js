@@ -40,17 +40,32 @@ const DEMO_GEMS = {
   ],
 };
 
+const DEMO_SCOUT = {
+  ts: Date.now(),
+  query: { field: 'style', query: 'Italo-Disco', minValue: 80, limit: 100, currency: 'EUR' },
+  inspected: 100,
+  candidates: 97,
+  excludedWantlist: 3,
+  aborted: false,
+  results: [
+    { releaseId: 7001, artist: 'Koto', title: 'Visitors', year: 1985, country: 'Italy', formats: ['Vinyl', '12"'], styles: ['Italo-Disco'], labels: ['Memory Records'], estimatedValue: 145, valueSource: 'suggestion', currency: 'EUR', numForSale: 2, lowestPrice: 119, want: 826, have: 301, thumb: '', releaseUrl: 'https://www.discogs.com/release/7001', marketplaceUrl: 'https://www.discogs.com/sell/release/7001' },
+    { releaseId: 7002, artist: 'Charlie', title: 'Spacer Woman', year: 1983, country: 'Italy', formats: ['Vinyl', '12"'], styles: ['Italo-Disco'], labels: ['Mr. Disc Organization'], estimatedValue: 105, valueSource: 'sold-median', currency: 'EUR', numForSale: 0, lowestPrice: null, want: 1412, have: 578, thumb: '', releaseUrl: 'https://www.discogs.com/release/7002', marketplaceUrl: 'https://www.discogs.com/sell/release/7002' },
+  ],
+};
+
 let allDeals = [];
 let allNearMisses = [];   // releases that looked cheap but didn't qualify (scan only) — see "Show near-misses"
 let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
 
-let activeTab = 'deals';  // 'deals' | 'gems' — the 💎 Rare tab shows rare appearances + the zero-stock watch list
+let activeTab = 'deals';  // 'deals' | 'gems' | 'scout'
 let gemsData = { ts: null, gems: [], zeroWatch: [] };
 let seenGemIds = new Set();
 let firstGemLoad = true;
 let scanning = false;
+let scouting = false;
+let scoutData = { ts: null, query: null, inspected: 0, candidates: 0, excludedWantlist: 0, aborted: false, results: [] };
 let scannedOnce = false;  // has a local scan run (or its results been loaded) this session? Distinguishes
                           // "no scan yet — go scan" from "scanned, nothing matched right now".
 
@@ -200,11 +215,14 @@ function resetFilters() {
 
 function updateViewCopy() {
   const gems = activeTab === 'gems';
-  $('view-eyebrow').textContent = gems ? 'RARITY WATCH' : 'YOUR WANTLIST';
-  $('view-title').textContent = gems ? 'Rare records that just surfaced' : 'Deals worth opening';
-  $('view-intro').textContent = gems
-    ? 'First copies after a release was unavailable — price is context, availability is the signal.'
-    : 'Verified copies ranked by total value, so the strongest opportunities stay on top.';
+  const scout = activeTab === 'scout';
+  $('view-eyebrow').textContent = scout ? 'BEYOND YOUR WANTLIST' : (gems ? 'RARITY WATCH' : 'YOUR WANTLIST');
+  $('view-title').textContent = scout ? 'Scout valuable records you may be missing' : (gems ? 'Rare records that just surfaced' : 'Deals worth opening');
+  $('view-intro').textContent = scout
+    ? 'Search Discogs by style or genre, filter on estimated VG+ value, and add promising pressings straight to your wantlist.'
+    : (gems
+        ? 'First copies after a release was unavailable — price is context, availability is the signal.'
+        : 'Verified copies ranked by total value, so the strongest opportunities stay on top.');
   $('search').placeholder = gems ? 'Search rare records' : 'Search artist or release';
 }
 
@@ -623,13 +641,189 @@ async function refreshGems() {
   } catch { /* keep the last known gems — the deals path surfaces connectivity problems */ }
 }
 
+// --- Scout: valuable records outside the wantlist ---------------------------
+const SCOUT_PREFS_KEY = 'ddw-scout-prefs-v1';
+
+function normalizeScoutData(value) {
+  if (!value || typeof value !== 'object') return { ts: null, query: null, inspected: 0, candidates: 0, excludedWantlist: 0, aborted: false, results: [] };
+  return {
+    ts: value.ts || null,
+    query: value.query || null,
+    inspected: Number(value.inspected) || 0,
+    candidates: Number(value.candidates) || 0,
+    excludedWantlist: Number(value.excludedWantlist) || 0,
+    aborted: !!value.aborted,
+    results: Array.isArray(value.results) ? value.results : [],
+  };
+}
+
+function currentScoutOptions() {
+  return {
+    field: $('scout-field').value,
+    query: $('scout-query').value.trim(),
+    minValue: Number($('scout-min-value').value) || 80,
+    limit: Number($('scout-limit').value) || 100,
+    currency: 'EUR',
+  };
+}
+
+function loadScoutPrefs() {
+  try { return JSON.parse(localStorage.getItem(SCOUT_PREFS_KEY) || '{}'); }
+  catch { return {}; }
+}
+
+function applyScoutPrefs(prefs) {
+  if (prefs.field === 'genre' || prefs.field === 'style') $('scout-field').value = prefs.field;
+  if (typeof prefs.query === 'string' && prefs.query.trim()) $('scout-query').value = prefs.query.trim();
+  if ([50, 100, 200].includes(Number(prefs.limit))) $('scout-limit').value = String(prefs.limit);
+  if (Number(prefs.minValue) >= 1) $('scout-min-value').value = String(prefs.minValue);
+}
+
+function scoutCard(item) {
+  const thumb = item.thumb
+    ? `<img class="thumb" src="${esc(item.thumb)}" alt="" referrerpolicy="no-referrer" />`
+    : '<div class="thumb"></div>';
+  const place = [item.year, item.country].filter(Boolean).join(' · ');
+  const valueLabel = item.valueSource === 'sold-median' ? 'recent real sold median' : 'Discogs VG+ price suggestion';
+  const copies = Number(item.numForSale);
+  const availability = Number.isFinite(copies)
+    ? (copies === 0 ? 'none for sale' : `${copies} for sale`)
+    : 'availability unknown';
+  const rarityClass = Number.isFinite(copies) && copies <= 3 ? ' scout-rare' : '';
+  const taxonomy = Array.isArray(item.styles) && item.styles.length ? item.styles : (item.genres || []);
+  const style = taxonomy.slice(0, 2).join(' · ');
+  const format = (item.formats || []).slice(0, 2).join(' · ');
+  const label = (item.labels || []).slice(0, 1).join('');
+  const wantText = `${Number(item.want) || 0} want · ${Number(item.have) || 0} have`;
+  const asking = item.lowestPrice != null
+    ? `lowest current asking price ${money(item.lowestPrice, item.currency)} (any condition)`
+    : (copies === 0 ? 'currently unavailable' : 'current asking price unavailable');
+  const added = !!item.addedToWantlist;
+  return `<article class="card is-scout">
+    ${thumb}
+    <div class="body">
+      <p class="title">${esc(item.title || 'Release ' + item.releaseId)}</p>
+      <p class="artist">${esc(item.artist || '')}${place ? ` · ${esc(place)}` : ''}</p>
+      <div class="price-row"><span class="price">${money(item.estimatedValue, item.currency)}</span><span class="scout-value-label">estimated VG+ value</span></div>
+      <div class="ref">${esc(valueLabel)} · ${esc(asking)}</div>
+      <div class="meta">
+        <span class="tag${rarityClass}">${esc(availability)}</span>
+        <span class="tag scout-demand">${esc(wantText)}</span>
+        ${style ? `<span class="tag">${esc(style)}</span>` : ''}
+        ${format ? `<span class="tag">${esc(format)}</span>` : ''}
+        ${label ? `<span class="tag">${esc(label)}${item.catno ? ` · ${esc(item.catno)}` : ''}</span>` : ''}
+      </div>
+      <div class="scout-actions">
+        <button class="buy scout-open" data-url="${esc(item.marketplaceUrl || item.releaseUrl)}">View marketplace →</button>
+        <button class="want-add" data-rid="${esc(item.releaseId)}"${added ? ' disabled' : ''}>${added ? '✓ In wantlist' : '+ Add to wantlist'}</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function renderScout() {
+  const wrap = $('deals');
+  const empty = $('empty');
+  const results = scoutData.results || [];
+  const query = scoutData.query;
+  $('pill-deals').textContent = `${results.length} scouted`;
+  $('resultCount').textContent = scoutData.ts
+    ? `${results.length} found · ${scoutData.inspected} inspected${scoutData.excludedWantlist ? ` · ${scoutData.excludedWantlist} already wanted` : ''}${scoutData.aborted ? ' · stopped early' : ''}`
+    : '';
+  if (!results.length) {
+    wrap.innerHTML = '';
+    empty.classList.remove('hidden');
+    empty.textContent = scoutData.ts
+      ? `No ${query ? query.query : ''} vinyl above ${money(query ? query.minValue : 80, query ? query.currency : 'EUR')} was found in the ${scoutData.inspected} releases inspected. Try a deeper scan or lower the value floor.`
+      : 'Choose a Discogs style or genre and start scouting. Results already on your wantlist are excluded automatically.';
+    return;
+  }
+  empty.classList.add('hidden');
+  wrap.innerHTML = results.map(scoutCard).join('');
+  wrap.querySelectorAll('.scout-open').forEach((button) => button.addEventListener('click', () => openUrl(button.getAttribute('data-url'))));
+  wrap.querySelectorAll('.want-add').forEach((button) => button.addEventListener('click', () => addScoutWant(button)));
+}
+
+function setScoutUI(on) {
+  scouting = on;
+  for (const id of ['scout-field', 'scout-query', 'scout-min-value', 'scout-limit', 'scout-run']) $(id).disabled = on;
+  $('scout-run').textContent = on ? 'Scouting…' : 'Start scouting';
+  $('scout-progress').classList.toggle('hidden', !on);
+  $('btn-fullscan').disabled = on || scanning;
+  if (on) setServiceBadge(lastHealth); else refreshHealth();
+}
+
+async function startScout(event) {
+  if (event) event.preventDefault();
+  if (scouting || scanning) return;
+  const opts = currentScoutOptions();
+  if (!opts.query) { $('scout-query').focus(); return; }
+  try { localStorage.setItem(SCOUT_PREFS_KEY, JSON.stringify(opts)); } catch { /* private mode */ }
+  if (!hasApi) {
+    scoutData = normalizeScoutData(DEMO_SCOUT);
+    renderScout();
+    return;
+  }
+  setScoutUI(true);
+  $('scout-progress-fill').style.width = '1%';
+  $('scout-status').textContent = 'Reading your wantlist so existing picks can be excluded…';
+  try {
+    const result = await window.api.scoutRun(opts);
+    if (result && result.postponed) {
+      const mins = result.cloudBusy && result.cloudBusy.endsInMs ? Math.ceil(result.cloudBusy.endsInMs / 60000) : null;
+      throw new Error(`The cloud watcher is scanning right now. Try Scout again${mins ? ` in about ${mins} minutes` : ' when it finishes'}.`);
+    }
+    scoutData = normalizeScoutData(result);
+    renderScout();
+  } catch (error) {
+    $('deals').innerHTML = '';
+    $('empty').classList.remove('hidden');
+    $('empty').textContent = 'Scout failed: ' + (error && error.message ? error.message : error);
+  } finally {
+    setScoutUI(false);
+  }
+}
+
+async function addScoutWant(button) {
+  if (!hasApi || button.disabled) return;
+  const releaseId = Number(button.getAttribute('data-rid'));
+  button.disabled = true;
+  button.textContent = 'Adding…';
+  try {
+    await window.api.scoutAddWant(releaseId);
+    scoutData = { ...scoutData, results: scoutData.results.map((item) => Number(item.releaseId) === releaseId ? { ...item, addedToWantlist: true } : item) };
+    renderScout();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Retry add to wantlist';
+    button.title = error && error.message ? error.message : String(error);
+  }
+}
+
+function onScoutProgress(message) {
+  if (!message) return;
+  let pctDone = 2;
+  if (message.phase === 'search') pctDone = 3 + Math.round((message.checked / Math.max(1, message.total)) * 17);
+  if (message.phase === 'pricing') pctDone = 20 + Math.round((message.checked / Math.max(1, message.total)) * 80);
+  if (message.phase === 'done') pctDone = 100;
+  $('scout-progress-fill').style.width = Math.min(100, pctDone) + '%';
+  if (message.phase === 'wantlist') $('scout-status').textContent = 'Reading your wantlist…';
+  else if (message.phase === 'search') $('scout-status').textContent = `Searching Discogs ${message.checked}/${message.total} · ${message.found} outside your wantlist`;
+  else if (message.phase === 'pricing') $('scout-status').textContent = `Checking value ${message.checked}/${message.total} · ${message.found} above your threshold`;
+  else if (message.phase === 'done') $('scout-status').textContent = `Done · ${message.found} records found${message.aborted ? ' (stopped early)' : ''}`;
+}
+
 function setTab(tab) {
   activeTab = tab;
   document.body.classList.toggle('tab-gems', tab === 'gems');
+  document.body.classList.toggle('tab-scout', tab === 'scout');
   $('tab-deals').classList.toggle('active', tab === 'deals');
   $('tab-gems').classList.toggle('active', tab === 'gems');
+  $('tab-scout').classList.toggle('active', tab === 'scout');
   $('tab-deals').setAttribute('aria-selected', tab === 'deals' ? 'true' : 'false');
   $('tab-gems').setAttribute('aria-selected', tab === 'gems' ? 'true' : 'false');
+  $('tab-scout').setAttribute('aria-selected', tab === 'scout' ? 'true' : 'false');
+  $('scout-panel').classList.toggle('hidden', tab !== 'scout');
   updateViewCopy();
   render();
 }
@@ -676,6 +870,7 @@ let enrichCache = { src: null, ship: null, list: [] };
 
 function render() {
   if (activeTab === 'gems') return renderGems();
+  if (activeTab === 'scout') return renderScout();
   const ship = shipVal();
   if (enrichCache.src !== allDeals || enrichCache.ship !== ship) enrichCache = { src: allDeals, ship, list: allDeals.map(enrich) };
   const enriched = enrichCache.list;
@@ -753,7 +948,9 @@ function setServiceBadge(h) {
   const badge = $('svc-badge'), label = $('svc-label'), sweep = $('pill-sweep');
   let state = 'idle', text = 'checking…', sub = '', title = 'Service status', url = null;
 
-  if (scanning) {
+  if (scouting) {
+    state = 'scan'; text = 'Scouting…'; title = 'Scout is searching Discogs beyond your wantlist.';
+  } else if (scanning) {
     state = 'scan'; text = 'Scanning…'; title = 'A local scan is running right now.';
   } else if (!h || h.mode === 'demo') {
     state = 'idle'; text = h ? 'demo' : 'checking…';
@@ -960,7 +1157,8 @@ function fmtEta(ms) {
 function setScanUI(on) {
   scanning = on;
   $('scanbar').classList.toggle('hidden', !on);
-  $('btn-fullscan').disabled = on;
+  $('btn-fullscan').disabled = on || scouting;
+  $('scout-run').disabled = on || scouting;
   $('btn-fullscan').innerHTML = on
     ? '<span>Scanning…</span>'
     : '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Scan wantlist</span>';
@@ -972,7 +1170,7 @@ let scanRetryTimer = null; // pending retry after a cloud-busy postponement (one
 
 async function startScan(opts = {}) {
   if (!hasApi) { alert('Local scan needs the desktop app (run it with npm start).'); return; }
-  if (scanning) return;
+  if (scanning || scouting) return;
   if (scanRetryTimer) { clearTimeout(scanRetryTimer); scanRetryTimer = null; }
   setScanUI(true);
   $('scan-fill').style.width = '0%';
@@ -1034,7 +1232,7 @@ async function startScan(opts = {}) {
 // scan pushes soldmedians.json as YOU, regular auto-scans also keep the GitHub cron from being
 // disabled after 60 days of no user activity.
 async function maybeAutoScan() {
-  if (!hasApi || scanning) return; // the age check below prevents redundant scans; don't gate on viewMode
+  if (!hasApi || scanning || scouting) return; // both scans share one Discogs token/rate budget
   // Need a configured Discogs token, or a scan can't run (and would just error).
   let cfg; try { cfg = await window.api.getConfig(); } catch { cfg = null; }
   if (!cfg || !cfg.hasToken || !cfg.username) return;
@@ -1473,6 +1671,8 @@ async function boot() {
   } else {
     allDeals = []; allNearMisses = [];
   }
+  let lastScoutResult = null; try { lastScoutResult = await window.api.scoutLast(); } catch { lastScoutResult = null; }
+  if (lastScoutResult) scoutData = normalizeScoutData(lastScoutResult);
   render();
   refreshHealth();
 }
@@ -1480,10 +1680,14 @@ async function boot() {
 // --- wire up ---
 window.addEventListener('DOMContentLoaded', () => {
   applyFilterState(readFilterState());
+  applyScoutPrefs(loadScoutPrefs());
   updateFilterUi();
   updateViewCopy();
   $('tab-deals').addEventListener('click', () => setTab('deals'));
   $('tab-gems').addEventListener('click', () => setTab('gems'));
+  $('tab-scout').addEventListener('click', () => setTab('scout'));
+  $('scout-form').addEventListener('submit', startScout);
+  $('scout-cancel').addEventListener('click', () => { if (hasApi) window.api.scoutCancel(); $('scout-status').textContent = 'Stopping Scout…'; });
   $('btn-filter-toggle').addEventListener('click', () => setFilterPanel($('btn-filter-toggle').getAttribute('aria-expanded') !== 'true'));
   $('btn-filter-reset').addEventListener('click', resetFilters);
   $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
@@ -1534,11 +1738,15 @@ window.addEventListener('DOMContentLoaded', () => {
   $('shipEst').addEventListener('input', onFilterChanged);
 
   if (hasApi) window.api.onScrapeProgress(onScanProgress);
+  if (hasApi) window.api.onScoutProgress(onScoutProgress);
   if (hasApi && window.api.onVerifyProgress) window.api.onVerifyProgress((m) => {
     verifyInfo = { running: m.phase === 'verifying', done: m.done || 0, total: m.total || 0 };
     if (activeTab === 'deals' && viewMode !== 'scan') render(); // updates the "checking listings n/m" note
   });
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+
+  // Static browser preview hook used by visual QA; the desktop app never has this hash.
+  if (!hasApi && location.hash === '#scout') { scoutData = normalizeScoutData(DEMO_SCOUT); setTab('scout'); }
 
   boot();                         // first-run wizard, last scan, or cloud poll — and lights up the badge
   refreshGems();                  // fill the 💎 Rare tab (works in every source mode; demo in preview)

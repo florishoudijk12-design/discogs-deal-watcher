@@ -65,6 +65,7 @@
     <nav class="tabs" aria-label="Watchlist views">
       <button id="tab-deals" class="tab active" type="button"><span class="tab-icon deal-icon">↘</span><span>Deals</span></button>
       <button id="tab-gems" class="tab" type="button" title="Releases that had zero copies for sale and just became available"><span class="tab-icon gem-icon">◆</span><span>Rare gems</span><span id="gems-count" class="tab-badge hidden"></span></button>
+      <button id="tab-scout" class="tab" type="button" title="Discover valuable records outside your wantlist"><span class="tab-icon scout-icon">⌖</span><span>Scout</span></button>
     </nav>
 
     <section class="view-header">
@@ -90,6 +91,28 @@
         <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span>Fine-tune</span><span id="filter-active-count" class="filter-count hidden"></span>
       </button>
+    </section>
+
+    <section id="scout-panel" class="scout-panel hidden" aria-label="Scout valuable records">
+      <form id="scout-form" class="scout-controls">
+        <label><span>Discogs field</span><select id="scout-field"><option value="style">Style</option><option value="genre">Genre</option></select></label>
+        <label class="scout-query"><span>Genre or style</span><input id="scout-query" type="text" list="scout-suggestions" value="Italo-Disco" maxlength="80" autocomplete="off" spellcheck="false" /></label>
+        <datalist id="scout-suggestions">
+          <option value="Italo-Disco"></option><option value="Euro-Disco"></option><option value="Hi NRG"></option><option value="Synth-pop"></option>
+          <option value="Disco"></option><option value="New Beat"></option><option value="Electro"></option><option value="House"></option>
+          <option value="Techno"></option><option value="Ambient"></option><option value="Funk"></option><option value="Soul"></option>
+          <option value="Electronic"></option><option value="Rock"></option><option value="Jazz"></option>
+        </datalist>
+        <label><span>Minimum value</span><div class="money-input"><b>€</b><input id="scout-min-value" type="number" min="1" max="5000" step="5" value="80" /></div></label>
+        <label><span>Search depth</span><select id="scout-limit"><option value="50">50 releases</option><option value="100" selected>100 releases</option><option value="200">200 releases</option></select></label>
+        <button id="scout-run" class="primary scout-run" type="submit">Start scouting</button>
+      </form>
+      <div class="scout-explainer">Value means Discogs’s VG+ price suggestion, or a recent real sold median already known by the app. It is a scouting signal—not a guaranteed sale price.</div>
+      <div id="scout-progress" class="scout-progress hidden">
+        <div class="scanbar-track"><div class="scanbar-fill" id="scout-progress-fill"></div></div>
+        <span id="scout-status">Preparing Scout…</span>
+        <button id="scout-cancel" class="ghost small" type="button">Stop</button>
+      </div>
     </section>
 
     <section id="filter-panel" class="filters hidden" aria-label="Deal filters">

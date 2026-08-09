@@ -69,7 +69,10 @@ function makeClient(opts = {}) {
         err.status = res.status;
         throw err;
       }
-      return { status: res.status, data: await res.json() };
+      if (res.status === 204) return { status: res.status, data: null };
+      let data = null;
+      try { data = await res.json(); } catch { /* successful empty response */ }
+      return { status: res.status, data };
     }
     throw new Error(`Discogs request gave up after retries: ${pathname}`);
   }
@@ -137,7 +140,26 @@ function makeClient(opts = {}) {
     };
   }
 
-  return { req, getWantlist, getMarketplaceStats, getPriceSuggestions, getRelease, get rateRemaining() { return remaining; } };
+  // Database discovery for the Scout tab. Discogs treats e.g. Italo-Disco as a style, while
+  // broader families such as Electronic or Rock are genres. Always limit this feature to concrete
+  // vinyl releases: master releases cannot be added to a wantlist and have no marketplace stats.
+  async function searchReleases({ field = 'style', query, format = 'Vinyl', page = 1, perPage = 100 } = {}) {
+    const key = field === 'genre' ? 'genre' : 'style';
+    const searchParams = { type: 'release', format, page, per_page: Math.min(100, Math.max(1, Number(perPage) || 100)) };
+    searchParams[key] = String(query || '').trim();
+    const { data } = await req('/database/search', { searchParams });
+    return {
+      pagination: data?.pagination || { page, pages: 1, items: 0 },
+      results: Array.isArray(data?.results) ? data.results : [],
+    };
+  }
+
+  async function addToWantlist(username, releaseId) {
+    const { data } = await req(`/users/${encodeURIComponent(username)}/wants/${Number(releaseId)}`, { method: 'PUT' });
+    return data || { id: Number(releaseId) };
+  }
+
+  return { req, getWantlist, getMarketplaceStats, getPriceSuggestions, getRelease, searchReleases, addToWantlist, get rateRemaining() { return remaining; } };
 }
 
 module.exports = { makeClient, API, DEFAULT_UA };
@@ -160,6 +182,11 @@ if (require.main === module && process.argv.includes('--selftest')) {
           : [{ id: 2, basic_information: { id: 100, title: 'B', artists: [{ name: 'X' }], year: 1990 } }] });
       }
       if (u.pathname.includes('/marketplace/stats/')) return json({ num_for_sale: 115, lowest_price: { value: 0.57, currency: 'EUR' }, blocked_from_sale: false });
+      if (u.pathname === '/database/search') return json({
+        pagination: { page: 1, pages: 1, items: 1 },
+        results: [{ id: 777, title: 'My Mine - Hypnotic Tango', style: ['Italo-Disco'], format: ['Vinyl'] }],
+      });
+      if (u.pathname.endsWith('/wants/777') && init.method === 'PUT') return json({ id: 777, rating: 0 });
       return json({});
     };
     let sleeps = 0;
@@ -173,6 +200,14 @@ if (require.main === module && process.argv.includes('--selftest')) {
     const stats = await c.getMarketplaceStats(249504, 'EUR');
     assert.strictEqual(stats.numForSale, 115);
     assert.strictEqual(stats.lowestPrice, 0.57);
+
+    const search = await c.searchReleases({ query: 'Italo-Disco', perPage: 50 });
+    assert.strictEqual(search.results[0].id, 777);
+    const searchUrl = new URL(calls.find((x) => new URL(x.url).pathname === '/database/search').url);
+    assert.strictEqual(searchUrl.searchParams.get('style'), 'Italo-Disco');
+    assert.strictEqual(searchUrl.searchParams.get('type'), 'release');
+    assert.strictEqual(searchUrl.searchParams.get('format'), 'Vinyl');
+    assert.strictEqual((await c.addToWantlist('someone', 777)).id, 777);
 
     // token present -> Authorization header set
     assert.ok(calls.every((x) => x.init.headers.Authorization === 'Discogs token=TESTTOKEN'), 'token header sent');
