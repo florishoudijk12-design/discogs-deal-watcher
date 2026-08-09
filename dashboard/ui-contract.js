@@ -1,0 +1,34 @@
+'use strict';
+
+/* Static contract between index.html and renderer.js.
+ * The dashboard deliberately hides advanced controls in a drawer, but none of their functionality
+ * may disappear. This test catches a removed/renamed/duplicated element before the app is packaged.
+ */
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+const renderer = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8');
+const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), (m) => m[1]);
+const idCounts = ids.reduce((map, id) => map.set(id, (map.get(id) || 0) + 1), new Map());
+const rendererRefs = new Set(Array.from(renderer.matchAll(/\$\('([^']+)'\)/g), (m) => m[1]));
+
+for (const id of rendererRefs) assert.strictEqual(idCounts.get(id), 1, `renderer element #${id} must exist exactly once`);
+for (const [id, count] of idCounts) assert.strictEqual(count, 1, `HTML id #${id} is duplicated`);
+
+const preserved = [
+  'tab-deals', 'tab-gems', 'btn-fullscan', 'btn-scan-cancel', 'btn-settings', 'btn-telegram',
+  'svc-badge', 'pill-sweep', 'pill-cron', 'push-badge', 'pill-wantlist', 'pill-deals',
+  'search', 'minValue', 'minDiscount', 'maxTotal', 'shipEst', 'sortBy', 'vgPlusOnly',
+  'freshOnly', 'showHidden', 'showNearMiss', 'settings-modal', 'cloud-modal', 'telegram-modal',
+  'wizard-modal', 'deals', 'empty',
+];
+for (const id of preserved) assert.strictEqual(idCounts.get(id), 1, `preserved feature #${id} missing`);
+
+assert.ok(/id="filter-panel"[^>]*class="[^"]*hidden/.test(html), 'advanced filters start collapsed');
+assert.ok(/id="tab-deals"/.test(html) && /id="tab-gems"/.test(html), 'Deals and Rare gems remain primary tabs');
+assert.ok(/Content-Security-Policy/.test(html), 'renderer CSP remains present');
+
+console.log(`ui-contract selftest: ${rendererRefs.size} renderer bindings and ${preserved.length} preserved features passed`);

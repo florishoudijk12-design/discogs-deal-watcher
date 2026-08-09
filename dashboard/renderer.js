@@ -123,6 +123,91 @@ function ago(ts) {
 
 const shipVal = () => parseFloat($('shipEst').value) || 0;
 
+// Daily use stays intentionally simple. The full filter engine still exists, but lives behind one
+// "Fine-tune" button and remembers the user's choices between app launches.
+const FILTER_STATE_KEY = 'ddw-filter-state-v2';
+const FILTER_DEFAULTS = {
+  minValue: '25', minDiscount: '50', maxTotal: '0', shipEst: '5', sortBy: 'best',
+  vgPlusOnly: false, freshOnly: false, showHidden: false, showNearMiss: false,
+};
+const FILTER_IDS = Object.keys(FILTER_DEFAULTS);
+
+function readFilterState() {
+  try { return { ...FILTER_DEFAULTS, ...JSON.parse(localStorage.getItem(FILTER_STATE_KEY) || '{}') }; }
+  catch { return { ...FILTER_DEFAULTS }; }
+}
+
+function applyFilterState(state) {
+  for (const id of FILTER_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = !!state[id];
+    else el.value = String(state[id]);
+  }
+}
+
+function currentFilterState() {
+  const state = {};
+  for (const id of FILTER_IDS) {
+    const el = $(id);
+    state[id] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  return state;
+}
+
+function saveFilterState() {
+  try { localStorage.setItem(FILTER_STATE_KEY, JSON.stringify(currentFilterState())); } catch { /* private mode */ }
+}
+
+function updateFilterUi() {
+  const minValue = parseInt($('minValue').value, 10) || 0;
+  const minDiscount = parseInt($('minDiscount').value, 10) || 0;
+  const maxTotal = parseInt($('maxTotal').value, 10) || 0;
+  const shipping = parseInt($('shipEst').value, 10) || 0;
+  $('minValueVal').textContent = minValue > 0 ? `€${minValue}+` : 'Any';
+  $('minDiscountVal').textContent = `${minDiscount}%`;
+  $('maxTotalVal').textContent = maxTotal > 0 ? `€${maxTotal}` : 'Any';
+  $('shipEstVal').textContent = `€${shipping}`;
+  $('summary-discount').textContent = `${minDiscount}%+ off`;
+  $('summary-value').textContent = minValue > 0 ? `€${minValue}+ value` : 'Any value';
+  const sortLabels = { best: 'Best first', discount: 'Biggest discount', total: 'Lowest total', savings: 'Most saved', newest: 'Newest first' };
+  $('summary-sort').textContent = sortLabels[$('sortBy').value] || 'Best first';
+
+  const state = currentFilterState();
+  const changed = FILTER_IDS.filter((id) => String(state[id]) !== String(FILTER_DEFAULTS[id])).length;
+  const badge = $('filter-active-count');
+  badge.textContent = changed ? String(changed) : '';
+  badge.classList.toggle('hidden', !changed);
+}
+
+function setFilterPanel(open) {
+  $('filter-panel').classList.toggle('hidden', !open);
+  $('btn-filter-toggle').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function onFilterChanged() {
+  updateFilterUi();
+  saveFilterState();
+  render();
+}
+
+function resetFilters() {
+  applyFilterState(FILTER_DEFAULTS);
+  updateFilterUi();
+  saveFilterState();
+  render();
+}
+
+function updateViewCopy() {
+  const gems = activeTab === 'gems';
+  $('view-eyebrow').textContent = gems ? 'RARITY WATCH' : 'YOUR WANTLIST';
+  $('view-title').textContent = gems ? 'Rare records that just surfaced' : 'Deals worth opening';
+  $('view-intro').textContent = gems
+    ? 'First copies after a release was unavailable — price is context, availability is the signal.'
+    : 'Verified copies ranked by total value, so the strongest opportunities stay on top.';
+  $('search').placeholder = gems ? 'Search rare records' : 'Search artist or release';
+}
+
 // "No longer listed" means exactly that: the release has NO copies for sale right now — not merely
 // that the price rose since the alert. A copy that's still there at a higher price is upgraded to
 // that price (see applyVerify) and left to the % slider, so cloud and scan agree on what's a deal.
@@ -471,7 +556,7 @@ function renderGems() {
   const match = (x) => !q || `${x.artist || ''} ${x.title || ''}`.toLowerCase().includes(q);
   const gems = (gemsData.gems || []).filter(match);
   const zw = (gemsData.zeroWatch || []).filter(match);
-  $('resultCount').textContent = '';
+  $('resultCount').textContent = `${gems.length} surfaced · ${zw.length} watched`;
   $('pill-deals').textContent = `${(gemsData.gems || []).length} gem${(gemsData.gems || []).length === 1 ? '' : 's'}`;
 
   if (!gems.length && !zw.length) {
@@ -543,6 +628,9 @@ function setTab(tab) {
   document.body.classList.toggle('tab-gems', tab === 'gems');
   $('tab-deals').classList.toggle('active', tab === 'deals');
   $('tab-gems').classList.toggle('active', tab === 'gems');
+  $('tab-deals').setAttribute('aria-selected', tab === 'deals' ? 'true' : 'false');
+  $('tab-gems').setAttribute('aria-selected', tab === 'gems' ? 'true' : 'false');
+  updateViewCopy();
   render();
 }
 
@@ -873,7 +961,9 @@ function setScanUI(on) {
   scanning = on;
   $('scanbar').classList.toggle('hidden', !on);
   $('btn-fullscan').disabled = on;
-  $('btn-fullscan').textContent = on ? '⏳ Scanning…' : '⚡ Full scan';
+  $('btn-fullscan').innerHTML = on
+    ? '<span>Scanning…</span>'
+    : '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Scan wantlist</span>';
   // While a scan runs the badge says "Scanning…"; once it ends, re-check the real service state.
   if (on) setServiceBadge(lastHealth); else refreshHealth();
 }
@@ -1389,8 +1479,13 @@ async function boot() {
 
 // --- wire up ---
 window.addEventListener('DOMContentLoaded', () => {
+  applyFilterState(readFilterState());
+  updateFilterUi();
+  updateViewCopy();
   $('tab-deals').addEventListener('click', () => setTab('deals'));
   $('tab-gems').addEventListener('click', () => setTab('gems'));
+  $('btn-filter-toggle').addEventListener('click', () => setFilterPanel($('btn-filter-toggle').getAttribute('aria-expanded') !== 'true'));
+  $('btn-filter-reset').addEventListener('click', resetFilters);
   $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
   $('btn-settings').addEventListener('click', openSettings);
@@ -1428,15 +1523,15 @@ window.addEventListener('DOMContentLoaded', () => {
   $('wiz-token-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://www.discogs.com/settings/developers'); });
 
   $('search').addEventListener('input', render);
-  $('sortBy').addEventListener('change', render);
-  $('freshOnly').addEventListener('change', render);
-  $('vgPlusOnly').addEventListener('change', render);
-  $('showHidden').addEventListener('change', render);
-  $('showNearMiss').addEventListener('change', render);
-  $('minValue').addEventListener('input', () => { const v = parseInt($('minValue').value, 10); $('minValueVal').textContent = v > 0 ? `€${v}+` : 'any'; render(); });
-  $('minDiscount').addEventListener('input', () => { $('minDiscountVal').textContent = $('minDiscount').value + '%'; render(); });
-  $('maxTotal').addEventListener('input', () => { const v = parseInt($('maxTotal').value, 10); $('maxTotalVal').textContent = v > 0 ? `€${v}` : 'any'; render(); });
-  $('shipEst').addEventListener('input', () => { $('shipEstVal').textContent = '€' + $('shipEst').value; render(); });
+  $('sortBy').addEventListener('change', onFilterChanged);
+  $('freshOnly').addEventListener('change', onFilterChanged);
+  $('vgPlusOnly').addEventListener('change', onFilterChanged);
+  $('showHidden').addEventListener('change', onFilterChanged);
+  $('showNearMiss').addEventListener('change', onFilterChanged);
+  $('minValue').addEventListener('input', onFilterChanged);
+  $('minDiscount').addEventListener('input', onFilterChanged);
+  $('maxTotal').addEventListener('input', onFilterChanged);
+  $('shipEst').addEventListener('input', onFilterChanged);
 
   if (hasApi) window.api.onScrapeProgress(onScanProgress);
   if (hasApi && window.api.onVerifyProgress) window.api.onVerifyProgress((m) => {

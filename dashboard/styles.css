@@ -1,354 +1,477 @@
 :root {
-  --bg: #0f1115;
-  --bg-2: #161a21;
-  --card: #1b212b;
-  --card-hover: #20283344;
-  --line: #2a323e;
-  --text: #e7ecf3;
-  --muted: #8b97a8;
-  --green: #2ecc71;
-  --green-deep: #1a7f37;
-  --amber: #f0b429;
-  --red: #ff5d5d;
-  --accent: #5b8def;
-  --gem: #b98aff;      /* 💎 rare-gem accent (violet) */
-  --gem-deep: #7c3aed;
-  --radius: 12px;
+  --bg: #0b1016;
+  --bg-raised: #0f161f;
+  --panel: #121b25;
+  --panel-2: #17222e;
+  --card: #141e29;
+  --card-hover: #182633;
+  --line: #263442;
+  --line-soft: #1b2834;
+  --text: #f2f5f7;
+  --muted: #8e9baa;
+  --muted-2: #647383;
+  --green: #3bd887;
+  --green-bright: #56eba0;
+  --green-deep: #15784b;
+  --amber: #f4bd58;
+  --red: #ff6b70;
+  --accent: #70a5ff;
+  --accent-soft: #1c3150;
+  --gem: #bc8cff;
+  --gem-deep: #7441c8;
+  --radius: 15px;
+  --shadow: 0 18px 45px rgba(0, 0, 0, .22);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(circle at 18% -10%, rgba(52, 102, 93, .14), transparent 30%),
+    var(--bg);
   color: var(--text);
-  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 14px;
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
 }
+button, input, select { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
-/* Topbar */
+/* App chrome */
 .topbar {
-  display: flex; align-items: center; gap: 16px;
-  padding: 12px 18px;
-  background: var(--bg-2);
-  border-bottom: 1px solid var(--line);
+  min-height: 68px;
+  padding: 13px 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(13, 20, 28, .94);
+  border-bottom: 1px solid var(--line-soft);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .16);
+  position: relative;
+  z-index: 20;
 }
-.brand { display: flex; align-items: center; gap: 10px; }
-.brand h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .2px; white-space: nowrap; }
-.brand .logo { width: 30px; height: 30px; display: block; border-radius: 7px; }
-.status { display: flex; gap: 8px; flex: 1; flex-wrap: wrap; }
-.pill {
-  font-size: 12px; color: var(--muted);
-  background: #11161d; border: 1px solid var(--line);
-  padding: 4px 10px; border-radius: 999px; white-space: nowrap;
+.brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.brand .logo {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: block;
+  border-radius: 11px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.05), 0 8px 18px rgba(0,0,0,.25);
 }
-
-/* Cron pill: when the cloud email watcher's GitHub Actions cron last ACTUALLY fired (GitHub
-   deprioritizes public-repo crons, so this shows the real cadence). Click opens Actions. */
-.pill.cron { font: inherit; font-size: 12px; cursor: pointer; }
-.pill.cron:hover { background: #1c2531; }
-.pill.cron.bad { color: var(--red); border-color: #5b2b2b; font-weight: 600; }
-
-/* Sold-medians push badge: persists the outcome of the auto git-push that feeds the cloud emails.
-   Green = synced; red = the push FAILED (stays until a push succeeds; click retries in place). */
-.pill.push { font: inherit; font-size: 12px; cursor: default; }
-.pill.push.ok { color: var(--green); border-color: #1f5135; }
-.pill.push.bad { color: var(--red); border-color: #5b2b2b; cursor: pointer; font-weight: 600; }
-.pill.push.bad:hover { background: #1c1216; }
-
-/* Live-service badge: the heartbeat of the cloud watcher. A colored, gently breathing dot tells you
-   at a glance whether the email/sweep service is actually running. Click-through opens the source
-   (GitHub Actions run / server). State classes: live | delayed | fail | down | scan | idle. */
-.svc {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: .3px;
-  color: var(--muted); background: #11161d; border: 1px solid var(--line);
-  padding: 4px 11px 4px 9px; border-radius: 999px; white-space: nowrap; cursor: pointer;
-}
-.svc:hover { background: #1c2531; }
-.svc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-
-.svc.live   { color: var(--green); border-color: #1f5135; }
-.svc.live   .svc-dot { background: var(--green); animation: svc-pulse 2.2s ease-out infinite; }
-.svc.delayed { color: var(--amber); border-color: #5a4a17; }
-.svc.delayed .svc-dot { background: var(--amber); }
-.svc.fail, .svc.down { color: var(--red); border-color: #5b2b2b; }
-.svc.fail .svc-dot, .svc.down .svc-dot { background: var(--red); }
-.svc.fail   .svc-dot { animation: svc-pulse-red 1.4s ease-out infinite; }
-.svc.scan   { color: var(--accent); border-color: #2c3f63; }
-.svc.scan   .svc-dot { background: var(--accent); animation: svc-pulse-blue 1.2s ease-out infinite; }
-.svc.idle   { color: var(--muted); }
-
-@keyframes svc-pulse      { 0% { box-shadow: 0 0 0 0 #2ecc7188; } 70% { box-shadow: 0 0 0 6px #2ecc7100; } 100% { box-shadow: 0 0 0 0 #2ecc7100; } }
-@keyframes svc-pulse-blue { 0% { box-shadow: 0 0 0 0 #5b8def88; } 70% { box-shadow: 0 0 0 6px #5b8def00; } 100% { box-shadow: 0 0 0 0 #5b8def00; } }
-@keyframes svc-pulse-red  { 0% { box-shadow: 0 0 0 0 #ff5d5d88; } 70% { box-shadow: 0 0 0 6px #ff5d5d00; } 100% { box-shadow: 0 0 0 0 #ff5d5d00; } }
-@media (prefers-reduced-motion: reduce) { .svc-dot { animation: none !important; } }
+.brand-copy { min-width: 0; }
+.brand h1 { font-size: 15px; line-height: 1.15; font-weight: 760; letter-spacing: .01em; margin: 0; white-space: nowrap; }
+.brand-copy > span { display: block; color: var(--muted-2); font-size: 11px; margin-top: 3px; white-space: nowrap; }
+.topbar-spacer { flex: 1; }
 .actions { display: flex; align-items: center; gap: 8px; }
-.actions button {
-  background: #11161d; color: var(--text); border: 1px solid var(--line);
-  width: 34px; height: 34px; border-radius: 9px; font-size: 16px; cursor: pointer;
+.icon-button, .activity-menu > summary {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  color: var(--muted);
+  background: #111a23;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
 }
-.actions button:hover { background: #1c2531; }
-/* ✈ Telegram badge: entry point to the push-alerts setup. Telegram blue on hover / when connected. */
-.actions button.tg-badge { display: inline-flex; align-items: center; justify-content: center; color: var(--muted); padding: 0; }
-.actions button.tg-badge:hover { color: #29a9eb; background: #12222e; }
-.actions button.tg-badge.ok { color: #29a9eb; border-color: #245a74; }
-/* id-scoped so the numbered markers win over the base .cloud-steps '○' marker regardless of order */
-#telegram-modal .tg-howto { counter-reset: tg; margin-bottom: 14px; }
-#telegram-modal .tg-howto li { counter-increment: tg; padding-left: 24px; }
-#telegram-modal .tg-howto li::before { content: counter(tg); color: var(--accent); font-weight: 700; left: 4px; }
-/* Primary action: Scan now */
+.icon-button:hover, .activity-menu > summary:hover { color: var(--text); background: var(--panel-2); border-color: #35485a; }
+.icon-button.tg-badge:hover, .icon-button.tg-badge.ok { color: #45b9f2; border-color: #245c77; background: #102531; }
+
 .actions button.scan {
-  width: auto; padding: 0 14px; font-size: 13px; font-weight: 700; white-space: nowrap;
-  background: linear-gradient(180deg, #2ee07a, #1fae5e); color: #06210f; border: none;
-  box-shadow: 0 1px 0 #ffffff22 inset, 0 2px 8px #1fae5e44;
+  min-width: 146px;
+  height: 40px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #062416;
+  background: linear-gradient(180deg, var(--green-bright), #2fcb7b);
+  box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 7px 20px rgba(42, 203, 122, .18);
+  font-size: 12.5px;
+  font-weight: 780;
+  cursor: pointer;
+  transition: transform .12s ease, filter .12s ease;
 }
-.actions button.scan:hover { background: linear-gradient(180deg, #3aee86, #25b766); }
-.actions button.scan:disabled { background: #1c2733; color: var(--muted); box-shadow: none; cursor: default; }
+.actions button.scan:hover { filter: brightness(1.05); transform: translateY(-1px); }
+.actions button.scan:disabled { color: var(--muted); background: #1b2732; box-shadow: none; cursor: default; transform: none; }
 
-/* Scan progress strip */
+/* Compact health indicator and the technical detail popover */
+.svc {
+  height: 36px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.svc:hover { background: #131e28; border-color: var(--line-soft); }
+.svc-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); }
+.svc.live { color: var(--green); }
+.svc.live .svc-dot { background: var(--green); animation: svc-pulse 2.2s ease-out infinite; }
+.svc.delayed { color: var(--amber); }
+.svc.delayed .svc-dot { background: var(--amber); }
+.svc.fail, .svc.down { color: var(--red); }
+.svc.fail .svc-dot, .svc.down .svc-dot { background: var(--red); }
+.svc.scan { color: var(--accent); }
+.svc.scan .svc-dot { background: var(--accent); animation: svc-pulse-blue 1.2s ease-out infinite; }
+.activity-menu { position: relative; }
+.activity-menu > summary { list-style: none; }
+.activity-menu > summary::-webkit-details-marker { display: none; }
+.activity-menu[open] > summary { color: var(--accent); background: var(--accent-soft); border-color: #34547e; }
+.activity-popover {
+  position: absolute;
+  top: 46px;
+  right: 0;
+  width: 265px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #121b25;
+  box-shadow: 0 20px 55px rgba(0,0,0,.48);
+  z-index: 40;
+}
+.popover-heading { color: var(--text); font-size: 12px; font-weight: 760; margin: 0 2px 3px; }
+.activity-counts { display: flex; gap: 7px; margin-top: 2px; }
+.activity-counts .pill { flex: 1; text-align: center; }
+.pill {
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  color: var(--muted);
+  background: #0e151d;
+  font-size: 11px;
+}
+button.pill { width: 100%; text-align: left; cursor: pointer; }
+.pill.cron:hover, .pill.push.bad:hover { background: #182431; }
+.pill.cron.bad, .pill.push.bad { color: var(--red); border-color: #60343a; font-weight: 700; }
+.pill.push.ok { color: var(--green); border-color: #245b40; }
+
+@keyframes svc-pulse { 0% { box-shadow: 0 0 0 0 rgba(59,216,135,.5); } 70% { box-shadow: 0 0 0 6px rgba(59,216,135,0); } 100% { box-shadow: 0 0 0 0 rgba(59,216,135,0); } }
+@keyframes svc-pulse-blue { 0% { box-shadow: 0 0 0 0 rgba(112,165,255,.5); } 70% { box-shadow: 0 0 0 6px rgba(112,165,255,0); } 100% { box-shadow: 0 0 0 0 rgba(112,165,255,0); } }
+@media (prefers-reduced-motion: reduce) { .svc-dot { animation: none !important; } }
+
+/* Scan progress */
 .scanbar {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 18px; background: #12161d; border-bottom: 1px solid var(--line);
+  margin: 12px 22px 0;
+  padding: 11px 13px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #254638;
+  border-radius: 13px;
+  background: linear-gradient(90deg, rgba(32,91,65,.26), rgba(18,27,37,.9));
+  flex: 0 0 auto;
 }
-.scanbar-track { flex: 1; height: 8px; background: #0c1014; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
-.scanbar-fill { height: 100%; width: 0; background: linear-gradient(90deg, #1fae5e, #2ee07a); border-radius: 999px; transition: width .25s ease; }
-.scanbar-text { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 220px; }
-.ghost.small { padding: 5px 10px; font-size: 12px; }
+.scan-state-icon { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: rgba(59,216,135,.12); }
+.scan-state-icon span { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: svc-pulse 1.3s ease-out infinite; }
+.scanbar-body { min-width: 0; flex: 1; }
+.scanbar-text { display: block; color: #c9d7d0; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 7px; }
+.scanbar-track { height: 4px; border-radius: 999px; overflow: hidden; background: #0a1117; }
+.scanbar-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2ac778, var(--green-bright)); transition: width .25s ease; }
+.ghost.small { padding: 6px 11px; font-size: 11px; }
 
-/* View tabs: 💸 Deals vs 💎 Rare gems */
+/* Main workspace */
+.workspace-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .tabs {
-  display: flex; gap: 6px; padding: 8px 18px 0;
-  background: #12161d; border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 5px;
+  align-self: flex-start;
+  margin: 20px 22px 0;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  background: #0e151d;
 }
 .tab {
-  background: transparent; color: var(--muted); border: 1px solid transparent; border-bottom: none;
-  padding: 8px 16px 9px; font-size: 13px; font-weight: 650; cursor: pointer;
-  border-radius: 10px 10px 0 0; position: relative; top: 1px;
-  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 38px;
+  padding: 0 15px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
 }
-.tab:hover { color: var(--text); background: #171d26; }
-.tab.active {
-  color: var(--text); background: var(--bg); border-color: var(--line);
-  border-bottom: 1px solid var(--bg);
-}
-.tab-badge {
-  font-size: 11px; font-weight: 800; color: #1d0b33;
-  background: var(--gem); border-radius: 999px; padding: 1px 7px; min-width: 12px; text-align: center;
-}
-/* The 💎 tab bypasses the deal sliders — only the search box stays. */
-body.tab-gems .filters > :not(#search) { display: none; }
+.tab:hover { color: var(--text); background: rgba(255,255,255,.025); }
+.tab.active { color: var(--text); background: var(--panel-2); box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 3px 9px rgba(0,0,0,.18); }
+.tab-icon { font-size: 14px; line-height: 1; }
+.deal-icon { color: var(--green); }
+.gem-icon { color: var(--gem); font-size: 12px; }
+.tab-badge { min-width: 21px; padding: 2px 6px; border-radius: 999px; color: #21142f; background: var(--gem); font-size: 10px; font-weight: 850; text-align: center; }
 
-/* Filters */
+.view-header {
+  padding: 22px 24px 12px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+.view-heading { min-width: 0; }
+.eyebrow { display: block; margin-bottom: 7px; color: var(--green); font-size: 9.5px; font-weight: 850; letter-spacing: .16em; }
+body.tab-gems .eyebrow { color: var(--gem); }
+.view-heading h2 { margin: 0; font-size: clamp(22px, 2.4vw, 29px); line-height: 1.12; letter-spacing: -.025em; font-weight: 760; }
+.view-heading p { max-width: 650px; margin: 7px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.result-count { color: var(--muted); font-size: 11.5px; white-space: nowrap; padding-bottom: 3px; }
+
+.discovery-bar {
+  margin: 0 22px;
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: rgba(16, 24, 33, .74);
+}
+.search-box {
+  min-width: 245px;
+  flex: 1;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: #0a1117;
+  color: var(--muted-2);
+}
+.search-box:focus-within { border-color: #355b87; box-shadow: 0 0 0 3px rgba(112,165,255,.08); color: var(--accent); }
+.search-box input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 12.5px; }
+.search-box input::placeholder { color: #647282; }
+.rule-summary { display: flex; align-items: center; gap: 6px; }
+.rule-summary span { padding: 5px 8px; border-radius: 7px; color: var(--muted); background: #111b25; font-size: 10.5px; white-space: nowrap; }
+.filter-toggle {
+  height: 38px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: #151f2a;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.filter-toggle:hover, .filter-toggle[aria-expanded="true"] { border-color: #3c5570; background: #1a2938; }
+.filter-count { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 999px; display: inline-grid; place-items: center; color: #102033; background: var(--accent); font-size: 9px; font-weight: 850; }
+
+/* Advanced filter drawer */
 .filters {
-  display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap;
-  padding: 10px 18px; border-bottom: 1px solid var(--line);
-  background: #12161d;
+  margin: 10px 22px 0;
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: linear-gradient(180deg, #131d27, #101820);
+  box-shadow: var(--shadow);
+  flex: 0 0 auto;
 }
-.filters input[type="search"] {
-  background: #0c1014; border: 1px solid var(--line); color: var(--text);
-  padding: 8px 12px; border-radius: 8px; width: 200px; font-size: 13px;
+.filter-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
+.filter-panel-head strong { display: block; font-size: 12.5px; }
+.filter-panel-head span { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+.text-button { border: 0; color: var(--accent); background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
+.text-button:hover { color: #9dc0ff; }
+.filter-grid { display: grid; grid-template-columns: repeat(5, minmax(145px, 1fr)); gap: 14px; }
+.filter-field { min-width: 0; display: flex; flex-direction: column; gap: 7px; color: var(--muted); }
+.filter-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #b5c0ca; font-size: 10.5px; }
+.filter-label b { color: var(--text); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.filter-field small { color: var(--muted-2); font-size: 9.5px; line-height: 1.3; }
+.filter-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.filter-field select {
+  width: 100%; height: 31px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
+  color: var(--text); background: #0c141b; font-size: 10.5px;
 }
-.filters .f { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.filters .f input[type="range"] { width: 96px; }
-.filters .f > span { min-width: 34px; color: var(--text); font-variant-numeric: tabular-nums; }
-.filters select {
-  background: #0c1014; border: 1px solid var(--line); color: var(--text);
-  padding: 6px 8px; border-radius: 8px; font-size: 12px;
-}
-.filters .checkbox { cursor: pointer; }
-.filters .spacer { flex: 1; }
-.filters .count { color: var(--muted); font-size: 12px; }
-input[type="range"] { accent-color: var(--accent); }
+.filter-switches { display: flex; flex-wrap: wrap; gap: 9px; padding-top: 15px; margin-top: 15px; border-top: 1px solid var(--line-soft); }
+.switch-row { display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--muted); background: #0d151d; cursor: pointer; }
+.switch-row input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-row > span { width: 23px; height: 13px; border-radius: 999px; background: #30404e; position: relative; transition: background .15s ease; }
+.switch-row > span::after { content: ''; position: absolute; width: 9px; height: 9px; top: 2px; left: 2px; border-radius: 50%; background: #8996a3; transition: transform .15s ease, background .15s ease; }
+.switch-row input:checked + span { background: var(--green-deep); }
+.switch-row input:checked + span::after { transform: translateX(10px); background: var(--green-bright); }
+.switch-row b { font-size: 10.5px; font-weight: 650; }
 
-/* Deals grid */
+body.tab-gems #rule-summary, body.tab-gems #btn-filter-toggle, body.tab-gems #filter-panel { display: none !important; }
+
+/* Result grid */
 .deals {
-  flex: 1; overflow-y: auto;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  gap: 14px; padding: 18px; align-content: start;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+  padding: 18px 22px 28px;
+  align-content: start;
 }
 .card {
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 14px; display: flex; gap: 12px; position: relative;
-  transition: transform .08s ease, border-color .12s ease;
+  min-width: 0;
+  padding: 17px;
+  display: flex;
+  gap: 15px;
+  position: relative;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(145deg, #16212c, #111922 78%);
+  box-shadow: 0 9px 28px rgba(0,0,0,.13);
+  transition: transform .12s ease, border-color .15s ease, background .15s ease;
 }
-.card:hover { transform: translateY(-2px); border-color: #38516f; }
-.card .thumb {
-  width: 76px; height: 76px; border-radius: 8px; object-fit: cover;
-  background: #0c1014; flex-shrink: 0;
-}
+.card:hover { transform: translateY(-2px); border-color: #365268; background: linear-gradient(145deg, #192733, #131d27 78%); }
+.card .thumb { width: 88px; height: 88px; flex: 0 0 auto; border-radius: 12px; object-fit: cover; background: #0a1117; box-shadow: 0 0 0 1px rgba(255,255,255,.035); }
 .card .body { flex: 1; min-width: 0; }
-.card .title { font-weight: 650; font-size: 14px; line-height: 1.3; margin: 0 0 2px;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.card .artist { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-.card .price-row { display: flex; align-items: baseline; gap: 8px; }
-.card .price { font-size: 22px; font-weight: 800; color: var(--green); }
-/* Recent lowest-price trail. Pushed to the right of the price row; sits on the baseline. */
-.card .spark { margin-left: auto; align-self: center; opacity: .85; overflow: visible; }
-.card .discount {
-  font-size: 12px; font-weight: 700; color: #0b2417; background: var(--green);
-  padding: 2px 7px; border-radius: 6px;
-}
-.card .subprice { color: var(--muted); font-size: 11px; margin-top: 3px; }
-/* Real per-copy shipping (scan-confirmed) reads in the normal text colour — it's a fact, not a guess. */
-.card .subprice.ship-real { color: var(--text); }
-/* Estimated shipping stays muted + italic so it's visibly a placeholder, never mistaken for the real cost. */
-.card .subprice.ship-est { color: var(--muted); font-style: italic; }
-.card .ref { color: var(--muted); font-size: 11.5px; margin-top: 6px; }
-.card .note { color: var(--muted); font-size: 11px; margin-top: 6px; font-style: italic; opacity: .85; }
-.card .note.drop { color: var(--green); font-style: normal; opacity: 1; font-weight: 600; }
+.card .title { max-width: calc(100% - 54px); margin: 0 0 3px; font-size: 14px; font-weight: 730; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .artist { margin: 0 0 11px; color: var(--muted); font-size: 11.5px; }
+.card .price-row { display: flex; align-items: center; gap: 8px; }
+.card .price { color: var(--green-bright); font-size: 23px; line-height: 1; font-weight: 820; letter-spacing: -.03em; }
+.card .discount { padding: 3px 7px; border-radius: 7px; color: #072316; background: var(--green); font-size: 10.5px; font-weight: 800; }
+.card .spark { margin-left: auto; opacity: .78; overflow: visible; }
+.card .subprice { margin-top: 6px; color: var(--muted); font-size: 10.5px; }
+.card .subprice.ship-real { color: #c5d0d8; }
+.card .subprice.ship-est { font-style: italic; }
+.card .ref { margin-top: 6px; color: var(--muted-2); font-size: 10.5px; line-height: 1.35; }
+.card .note { margin-top: 7px; color: var(--muted); font-size: 10.5px; line-height: 1.35; font-style: italic; opacity: .9; }
+.card .note.drop { color: var(--green); font-style: normal; font-weight: 650; }
 .card .note .altlink { color: var(--accent); text-decoration: none; font-style: normal; }
-.card .note .altlink:hover { text-decoration: underline; }
-.card .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); padding: 2px 7px; border-radius: 6px; }
-.tag.warn { color: var(--amber); border-color: #5a4a17; }
-.tag.fresh { color: #06210f; background: var(--green); border-color: var(--green); font-weight: 700; }
-/* Confirmed VG+ (or better): a real, verified grade read off the live listing. */
-.tag.good { color: var(--green); border-color: #1f5135; font-weight: 650; }
-.tag.history { color: #7dd3fc; border-color: #24566d; }
-.card.is-fresh { border-color: #2c6b46; box-shadow: 0 0 0 1px #2ecc7133, 0 6px 18px -8px #1fae5e55; }
-/* A scan-confirmed (condition-verified) deal gets a subtle green left edge. */
+.card .meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.tag { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: rgba(9,15,21,.35); font-size: 9.5px; }
+.tag.good { color: var(--green); border-color: #285f44; font-weight: 700; }
+.tag.warn { color: var(--amber); border-color: #665124; }
+.tag.fresh { color: #072316; border-color: var(--green); background: var(--green); font-weight: 800; }
+.tag.history { color: #7dd3fc; border-color: #285c72; }
+.tag.gone { color: var(--amber); border-color: #665124; font-weight: 700; }
+.card.is-fresh { border-color: #2b6648; box-shadow: 0 0 0 1px rgba(59,216,135,.06), 0 9px 28px rgba(0,0,0,.13); }
 .card.is-verified { border-left: 3px solid var(--green); }
-/* Collapsed history for cards whose price no longer exists — they're not deals anymore. */
-.gone-history { grid-column: 1 / -1; margin-top: 6px; }
-.gone-history summary {
-  cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600;
-  padding: 8px 4px; border-top: 1px solid var(--line); user-select: none;
-}
-.gone-history summary:hover { color: var(--text); }
-.gone-history .gone-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  gap: 14px; padding-top: 10px;
-}
-/* The alerted copy is gone (sold/delisted since the alert): dim the card + strike the dead price. */
-.tag.gone { color: var(--amber); border-color: #5a4a17; font-weight: 650; }
-.card.is-gone { opacity: 0.55; }
-.card.is-gone .price, .card.is-gone .discount { text-decoration: line-through; text-decoration-thickness: 1.5px; }
-/* Gone GEM cards: keep the card itself readable and let the banner scream — dim only the
-   content around it (card-level opacity would dim the banner too). */
-.card.is-gem.is-gone { opacity: 1; border-color: #6b5a1e; }
+.card .buy { margin-top: 13px; padding: 8px 12px; border: 0; border-radius: 9px; color: white; background: var(--green-deep); font-size: 11px; font-weight: 720; cursor: pointer; }
+.card .buy:hover { background: #19945e; }
+.card .when { position: absolute; top: 16px; right: 35px; color: var(--muted-2); font-size: 9.5px; }
+.card .dismiss { position: absolute; top: 10px; right: 10px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: var(--muted-2); background: transparent; font-size: 16px; line-height: 20px; opacity: .5; cursor: pointer; }
+.card .dismiss:hover { opacity: 1; color: var(--text); background: rgba(255,255,255,.06); }
+.card .dismiss.restore { color: var(--accent); opacity: .9; }
+.card.is-hidden { opacity: .52; }
+.card.is-gone { opacity: .5; }
+.card.is-gone .price, .card.is-gone .discount { text-decoration: line-through; }
+
+.gone-history { grid-column: 1 / -1; margin-top: 4px; }
+.gone-history summary { padding: 10px 3px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; font-weight: 650; cursor: pointer; }
+.gone-history .gone-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; padding-top: 10px; }
+.deals .nearmiss-head { grid-column: 1 / -1; padding-top: 14px; border-top: 1px dashed var(--line); color: var(--muted); font-size: 11px; font-weight: 650; }
+.card.is-nearmiss { opacity: .64; border-style: dashed; }
+.card.is-nearmiss:hover { opacity: 1; }
+.card .why { margin-top: 7px; color: #c7d0d7; font-size: 10.5px; line-height: 1.45; }
+.card .why b { color: var(--amber); }
+.card .buy.ghostbuy { color: var(--text); background: transparent; border: 1px solid var(--line); }
+
+/* Rare gems */
+.card.is-gem { border-color: #49366b; box-shadow: 0 0 0 1px rgba(188,140,255,.04), 0 9px 28px rgba(0,0,0,.13); }
+.card.is-gem .price.gem-price { color: var(--gem); }
+.card .gem-ask { color: var(--muted); font-size: 10px; font-style: italic; }
+.tag.gem { color: #21142f; background: var(--gem); border-color: var(--gem); font-weight: 800; }
+.card .buy.gembuy { background: var(--gem-deep); }
+.card .buy.gembuy:hover { color: #20142e; background: var(--gem); }
+.card.is-gem.is-gone { opacity: 1; border-color: #695a2a; }
 .card.is-gem.is-gone .thumb, .card.is-gem.is-gone .title, .card.is-gem.is-gone .artist,
 .card.is-gem.is-gone .meta, .card.is-gem.is-gone .price-row, .card.is-gem.is-gone .ref,
-.card.is-gem.is-gone .recent-sales, .card.is-gem.is-gone .buy { opacity: 0.5; }
-.gem-gone-banner {
-  margin: 8px 0 2px;
-  padding: 7px 10px;
-  border: 1px solid #7a651f;
-  border-radius: 8px;
-  background: rgba(255, 193, 7, 0.12);
-  color: var(--amber);
-  font-weight: 800;
-  font-size: 12.5px;
-  letter-spacing: 0.04em;
-}
-.card .buy {
-  display: inline-block; margin-top: 12px; text-decoration: none; cursor: pointer;
-  background: var(--green-deep); color: #fff; padding: 8px 14px; border-radius: 8px;
-  font-size: 13px; font-weight: 650; border: none;
-}
-.card .buy:hover { background: var(--green); }
-.card .when { position: absolute; top: 12px; right: 30px; color: var(--muted); font-size: 11px; }
-/* Hide / restore a deal you've already judged. Subtle until hovered. */
-.card .dismiss {
-  position: absolute; top: 6px; right: 8px; width: 20px; height: 20px; padding: 0;
-  border: none; background: transparent; color: var(--muted); font-size: 16px; line-height: 18px;
-  border-radius: 5px; cursor: pointer; opacity: .5;
-}
-.card .dismiss:hover { opacity: 1; background: #ffffff14; color: var(--text); }
-.card .dismiss.restore { color: var(--accent); opacity: .85; font-size: 14px; }
-.card.is-hidden { opacity: .55; }
-
-/* Near-misses: a divider spanning the grid, then dimmed dashed cards explaining why each release
-   looked cheap but didn't qualify. Opt-in via "Show near-misses"; scan-only. */
-.deals .nearmiss-head {
-  grid-column: 1 / -1;
-  color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .2px;
-  border-top: 1px dashed var(--line); padding-top: 14px; margin-top: 2px;
-}
-.card.is-nearmiss { opacity: .68; border-style: dashed; }
-.card.is-nearmiss:hover { opacity: 1; }
-.card .why { color: var(--text); font-size: 12px; line-height: 1.45; margin-top: 6px; }
-.card .why b { color: var(--amber); font-weight: 700; }
-.card .buy.ghostbuy { background: transparent; border: 1px solid var(--line); color: var(--text); margin-top: 10px; }
-.card .buy.ghostbuy:hover { background: #1c2531; }
-
-/* 💎 Rare-gem cards: violet accent so a rare appearance can never be mistaken for a price deal. */
-.card.is-gem { border-color: #4a3670; box-shadow: 0 0 0 1px #b98aff22, 0 6px 18px -8px #7c3aed44; }
-.card.is-gem .price.gem-price { color: var(--gem); }
-.card .gem-ask { font-size: 11px; color: var(--muted); font-style: italic; }
-.tag.gem { color: #1d0b33; background: var(--gem); border-color: var(--gem); font-weight: 700; }
-.card .buy.gembuy { background: var(--gem-deep); }
-.card .buy.gembuy:hover { background: var(--gem); color: #1d0b33; }
-
-/* Recent-sales chips: replaces the single "worth ~X (median)" line when we have the real sale-by-sale
-   history (last 10, <=2yr) — a far better value signal for a rare/appreciating record. */
-.card .recent-sales { margin-top: 6px; }
-.card .recent-sales .label { font-size: 10.5px; color: var(--muted); margin-bottom: 3px; }
+.card.is-gem.is-gone .recent-sales, .card.is-gem.is-gone .buy { opacity: .46; }
+.gem-gone-banner { margin: 8px 0 2px; padding: 7px 9px; border: 1px solid #725f28; border-radius: 8px; color: var(--amber); background: rgba(244,189,88,.09); font-size: 10.5px; font-weight: 800; }
+.card .recent-sales { margin-top: 7px; }
+.card .recent-sales .label { margin-bottom: 4px; color: var(--muted-2); font-size: 9.5px; }
 .card .recent-sales .chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.card .sale-chip { display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 11px; background: #2a2140; color: #d9c7ff; }
-.card .sale-chip .d { color: #9b7fd4; margin-left: 3px; }
-
-/* Section headers inside the 💎 tab (span the grid). */
-.deals .gems-head, .deals .zw-head {
-  grid-column: 1 / -1;
-  color: var(--text); font-size: 12.5px; font-weight: 650; letter-spacing: .2px;
-}
+.card .sale-chip { padding: 3px 6px; border-radius: 8px; color: #ddccf7; background: #2b2041; font-size: 9.5px; }
+.card .sale-chip .d { color: #997ac7; margin-left: 3px; }
+.deals .gems-head, .deals .zw-head { grid-column: 1 / -1; color: var(--text); font-size: 11.5px; font-weight: 680; }
 .deals .gems-head.muted { color: var(--muted); font-weight: 500; }
-.deals .zw-head { color: var(--muted); border-top: 1px dashed var(--line); padding-top: 14px; margin-top: 4px; }
+.deals .zw-head { padding-top: 14px; margin-top: 3px; border-top: 1px dashed var(--line); color: var(--muted); }
 .deals .zw-head b { color: var(--gem); }
-
-/* Zero-stock watch list: compact rows, not cards — it's a watch list, not a result list. */
-.deals .zw-list {
-  grid-column: 1 / -1;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px 14px;
-}
-.zw-row {
-  display: flex; align-items: center; gap: 8px; min-width: 0;
-  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-  padding: 7px 10px; font-size: 12px;
-}
-.zw-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gem); opacity: .7; flex-shrink: 0; }
-.zw-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.zw-year { color: var(--muted); font-variant-numeric: tabular-nums; }
+.deals .zw-list { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 7px; }
+.zw-row { min-width: 0; padding: 9px 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line-soft); border-radius: 10px; color: #c8d0d7; background: #111a23; font-size: 10.5px; }
+.zw-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--gem); opacity: .75; }
+.zw-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zw-year { color: var(--muted-2); }
 .zw-link { color: var(--accent); text-decoration: none; }
-.zw-link:hover { text-decoration: underline; }
 
-.empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); padding: 40px; text-align: center; }
+.empty { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 42px; color: var(--muted); text-align: center; line-height: 1.6; }
 .hidden { display: none !important; }
+.spacer { flex: 1; }
 
-/* Modal */
-.modal { position: fixed; inset: 0; background: #000a; display: flex; align-items: center; justify-content: center; z-index: 50; }
-.modal-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; width: 440px; max-width: 92vw; }
-.modal-card h2 { margin: 0 0 4px; font-size: 17px; }
-.modal-card .hint { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
-.modal-card label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
-.modal-card .opt { color: #5f6b7a; font-weight: 400; }
+/* Modals and setup flows stay fully available, but visually step back from the daily dashboard. */
+.modal { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 22px; background: rgba(2,6,10,.76); backdrop-filter: blur(7px); }
+.modal-card { width: 460px; max-width: 94vw; max-height: 90vh; overflow-y: auto; padding: 24px; border: 1px solid var(--line); border-radius: 18px; color: var(--text); background: #131d27; box-shadow: 0 28px 80px rgba(0,0,0,.58); }
+.modal-card h2 { margin: 0 0 7px; font-size: 19px; letter-spacing: -.015em; }
+.modal-card .hint { margin: 0 0 17px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.modal-card label { display: block; margin-bottom: 15px; color: var(--muted); font-size: 11.5px; }
+.modal-card .opt { color: var(--muted-2); font-weight: 400; }
 .modal-card input[type="text"], .modal-card input[type="password"], .modal-card select {
-  display: block; width: 100%; margin-top: 6px; background: #0c1014; border: 1px solid var(--line);
-  color: var(--text); padding: 9px 11px; border-radius: 8px; font-size: 13px;
+  display: block; width: 100%; margin-top: 7px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px;
+  color: var(--text); background: #0c141b; font-size: 12px;
 }
-.modal-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
-.modal-actions .spacer { flex: 1; }
-button.primary { background: var(--accent); color: #fff; border: none; padding: 9px 16px; border-radius: 8px; font-weight: 650; cursor: pointer; }
-button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); padding: 9px 14px; border-radius: 8px; cursor: pointer; }
-.test-result { font-size: 12px; min-height: 16px; margin-bottom: 12px; }
+.modal-card a { color: var(--accent); }
+.modal-actions { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+button.primary { padding: 9px 15px; border: 0; border-radius: 9px; color: #fff; background: #477fc9; font-size: 11.5px; font-weight: 700; cursor: pointer; }
+button.primary:hover { background: #5791df; }
+button.ghost { padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: transparent; font-size: 11.5px; cursor: pointer; }
+button.ghost:hover { background: var(--panel-2); }
+.test-result { min-height: 16px; margin-bottom: 12px; font-size: 11px; }
 .test-result.ok { color: var(--green); }
 .test-result.bad { color: var(--red); }
-.modal-card { max-height: 92vh; overflow-y: auto; }
-
-/* ☁ Cloud setup — the step checklist shown while the wizard works */
-.cloud-steps { list-style: none; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; color: var(--muted); }
-.cloud-steps li { padding: 3px 0 3px 22px; position: relative; }
-.cloud-steps li::before { content: '○'; position: absolute; left: 2px; color: #5f6b7a; }
+.cloud-steps { list-style: none; margin: 0 0 13px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 11px; }
+.cloud-steps li { position: relative; padding: 4px 0 4px 22px; }
+.cloud-steps li::before { content: '○'; position: absolute; left: 2px; color: var(--muted-2); }
 .cloud-steps li.busy { color: var(--text); }
-.cloud-steps li.busy::before { content: '◔'; color: #e8c268; }
+.cloud-steps li.busy::before { content: '◔'; color: var(--amber); }
 .cloud-steps li.ok { color: var(--text); }
 .cloud-steps li.ok::before { content: '✓'; color: var(--green); }
 .cloud-steps li[data-detail]::after { content: ' — ' attr(data-detail); color: var(--muted); }
+#telegram-modal .tg-howto { counter-reset: tg; margin-bottom: 14px; }
+#telegram-modal .tg-howto li { counter-increment: tg; padding-left: 24px; }
+#telegram-modal .tg-howto li::before { content: counter(tg); left: 4px; color: var(--accent); font-weight: 800; }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 10px; }
-::-webkit-scrollbar-thumb { background: #2a323e; border-radius: 6px; }
+::-webkit-scrollbar { width: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #2c3b49; background-clip: padding-box; }
+
+@media (max-width: 920px) {
+  .brand-copy > span { display: none; }
+  .rule-summary span:nth-child(2) { display: none; }
+  .filter-grid { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
+}
+@media (max-width: 700px) {
+  .topbar { padding-inline: 14px; }
+  .svc-label { display: none; }
+  .svc { padding: 0 5px; }
+  .actions button.scan { min-width: 42px; width: 42px; padding: 0; }
+  .actions button.scan span { display: none; }
+  .view-header { padding-inline: 16px; }
+  .tabs, .discovery-bar, .filters { margin-left: 14px; margin-right: 14px; }
+  .rule-summary { display: none; }
+  .filter-grid { grid-template-columns: repeat(2, minmax(135px, 1fr)); }
+  .deals { grid-template-columns: 1fr; padding-inline: 14px; }
+}
