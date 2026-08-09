@@ -226,6 +226,23 @@ input[type="range"] { accent-color: var(--accent); }
 .tag.gone { color: var(--amber); border-color: #5a4a17; font-weight: 650; }
 .card.is-gone { opacity: 0.55; }
 .card.is-gone .price, .card.is-gone .discount { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+/* Gone GEM cards: keep the card itself readable and let the banner scream — dim only the
+   content around it (card-level opacity would dim the banner too). */
+.card.is-gem.is-gone { opacity: 1; border-color: #6b5a1e; }
+.card.is-gem.is-gone .thumb, .card.is-gem.is-gone .title, .card.is-gem.is-gone .artist,
+.card.is-gem.is-gone .meta, .card.is-gem.is-gone .price-row, .card.is-gem.is-gone .ref,
+.card.is-gem.is-gone .recent-sales, .card.is-gem.is-gone .buy { opacity: 0.5; }
+.gem-gone-banner {
+  margin: 8px 0 2px;
+  padding: 7px 10px;
+  border: 1px solid #7a651f;
+  border-radius: 8px;
+  background: rgba(255, 193, 7, 0.12);
+  color: var(--amber);
+  font-weight: 800;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+}
 .card .buy {
   display: inline-block; margin-top: 12px; text-decoration: none; cursor: pointer;
   background: var(--green-deep); color: #fff; padding: 8px 14px; border-radius: 8px;

@@ -171,16 +171,59 @@ async function getStatus() {
 //   • server — the live /api/gems endpoint.
 //   • scan   — the LOCAL store's accumulated gems (state/gems.json, appended by runScrape) + the
 //              zero-stock watch list saved with the last scan.
+// One card per release: the stored feed is event-based, so a listing that flaps 0↔1 (seller
+// delists for half a day, relists) used to produce a duplicate card per re-appearance. Keep only
+// the NEWEST gem per releaseId (lists are newest-first in every source).
+function dedupeGems(list) {
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).filter((g) => {
+    if (!g || g.releaseId == null || seen.has(g.releaseId)) return false;
+    seen.add(g.releaseId);
+    return true;
+  });
+}
 async function getGems() {
   const s = readSettings();
   const src = s.sourceType || 'scan';
-  if (src === 'server') return serverGet(s, '/api/gems?limit=100');
+  if (src === 'server') {
+    const r = await serverGet(s, '/api/gems?limit=100');
+    if (r && Array.isArray(r.gems)) r.gems = dedupeGems(r.gems);
+    return r;
+  }
   if (src === 'github') {
     const g = await githubFile(s, 'gems.json');
-    return g && typeof g === 'object' ? { ts: g.ts || null, gems: g.gems || [], zeroWatch: g.zeroWatch || [] } : { ts: null, gems: [], zeroWatch: [] };
+    return g && typeof g === 'object' ? { ts: g.ts || null, gems: dedupeGems(g.gems), zeroWatch: g.zeroWatch || [] } : { ts: null, gems: [], zeroWatch: [] };
   }
   let gems = [];
-  try { gems = JSON.parse(fs.readFileSync(path.join(stateDir(), 'gems.json'), 'utf8')).slice(0, 100); } catch { /* no gems yet */ }
+  try { gems = dedupeGems(JSON.parse(fs.readFileSync(path.join(stateDir(), 'gems.json'), 'utf8'))).slice(0, 100); } catch { /* no gems yet */ }
+  // Retro-enrich: a gem stores the recent-sales list known at DETECTION time, which is null for
+  // anything detected before the Discogs login was done (or while the median sat in the weekly
+  // cache without a sales list). Join the CURRENT store's sales onto each card so old gems light
+  // up as soon as a later scan has read the sales-history page.
+  try {
+    const sm = JSON.parse(fs.readFileSync(path.join(stateDir(), 'soldmedians.json'), 'utf8'));
+    gems = gems.map((g) => {
+      const e = sm[g.releaseId];
+      if (e && Array.isArray(e.sales) && e.sales.length && !(Array.isArray(g.recentSales) && g.recentSales.length)) {
+        return { ...g, recentSales: e.sales };
+      }
+      return g;
+    });
+  } catch { /* no medians yet */ }
+  // "No longer listed" from the SCAN's own observation history: if the latest observation for a
+  // gem's release counts 0 for sale (recorded after the gem fired), the copy is gone — mark it
+  // here so the card shows it ALWAYS, not only when the best-effort live verify happens to
+  // succeed (a Cloudflare hiccup used to leave a sold gem posing as buyable). The live verify
+  // can still overrule in both directions with fresher data (a relist un-marks it).
+  try {
+    const hist = JSON.parse(fs.readFileSync(path.join(stateDir(), 'history.json'), 'utf8'));
+    gems = gems.map((g) => {
+      const obs = hist[g.releaseId];
+      const latest = Array.isArray(obs) && obs.length ? obs[obs.length - 1] : null;
+      if (latest && latest.numForSale === 0 && latest.ts > (g.ts || 0)) return { ...g, gone: true };
+      return g;
+    });
+  } catch { /* no history yet */ }
   const last = lastScan();
   return { ts: last ? last.ts : null, gems, zeroWatch: (last && last.zeroWatch) || [] };
 }
@@ -278,6 +321,30 @@ async function getServiceHealth() {
   }
   try { return await githubHealth(s); }
   catch (e) { return { mode: 'github', ok: false, repo: s.githubRepo, error: e.message }; }
+}
+
+// Is the cloud sweep (GitHub Actions watch.yml) running RIGHT NOW? Load-bearing for the local
+// scan: Discogs meters the API budget PER TOKEN (verified live 2026-07-18 — with the dashboard
+// fully idle, the token's used-counter sat at ~53/min while a cloud budget run swept from GitHub's
+// datacenter IP). The cloud run and a local scan therefore share ONE 60/min budget; running both
+// concurrently makes each see remaining<=1 and 429s, and both crawl at a handful of calls per
+// minute (a 13-min scan balloons to hours — seen live). So runScrape postpones a scan while a
+// cloud run is active instead of fighting it. Fail-OPEN: any error (offline, GitHub rate limit,
+// no repo derivable) returns null and the scan just runs — same spirit as the cron Worker.
+async function cloudScanActive() {
+  try {
+    const s = readSettings();
+    const repo = await cronRepo(s);
+    if (!repo) return null;
+    const h = await githubHealth({ ...s, githubRepo: repo });
+    const run = h && h.ok ? h.run : null;
+    if (!run || (run.status !== 'in_progress' && run.status !== 'queued')) return null;
+    // Estimate when it frees the budget: schedule ticks run the ~70-min multi-sweep budget,
+    // Worker/manual dispatches do a single ~15-min sweep.
+    const budgetMs = (run.event === 'schedule' ? 75 : 16) * 60_000;
+    const endsInMs = Math.max(60_000, (run.startedAt || Date.now()) + budgetMs - Date.now());
+    return { startedAt: run.startedAt, event: run.event, url: run.url, endsInMs };
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +566,8 @@ async function waitFor(cfWin, script, ok, { tries = 20, step = 400, max = 1500 }
 }
 
 // Read a release's REAL data from a hidden (real Chromium, residential IP) window:
-//   (1) its sales-history median (Last Sold / Low / Median / High) — ONLY when we need it, and
+//   (1) its sold-median (Last Sold / Low / Median / High, anonymous release-page scrape) — ONLY
+//       when we need it, and
 //   (2) its per-copy marketplace listings (condition/price via the same-origin sell_item JSON)
 //       joined with REAL per-copy shipping (scraped from the rendered sell page).
 // The Cloudflare JS challenge clears in this window; the cf_clearance cookie persists across
@@ -510,31 +578,24 @@ async function waitFor(cfWin, script, ok, { tries = 20, step = 400, max = 1500 }
 // whole navigation is the single biggest per-candidate saving (and one fewer hit on Discogs). The
 // sell page is same-origin for the JSON fetch AND carries the shipping rows, so condition + price +
 // shipping all come from ONE navigation; the release page is loaded only on a sold-median cache miss.
+//
+// This is the MEDIAN-ONLY path, used for every candidate confirmation and warm-up probe — it's
+// anonymous (no login needed) and deliberately does NOT touch the Sales History page. The much
+// slower, login-gated per-sale scrape (fetchSalesHistory, below) is reserved for rare gems only,
+// run as a separate step AFTER a scan has identified them — see the gem enrichment pass in
+// runScrape. Don't merge that logic back in here; that's what made every candidate/warm-up probe
+// pay for a sales-history navigation it didn't need.
 async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
   const needSold = opts.needSold !== false;
   let sold = null;
   let cleared = false;
 
   if (needSold) {
-    await cfWin.loadURL(SALES_HISTORY_URL(releaseId), { userAgent: DISCOGS_UA }).catch(() => {});
-    const r = await waitFor(cfWin, SALES_HISTORY_EXTRACT, (x) => x && (x.loginRequired || (!x.challenged && x.len > 800)));
-    if (r && !r.loginRequired && !r.challenged) {
+    await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
+    const r2 = await waitFor(cfWin, SOLD_EXTRACT, (x) => x && !x.challenged && x.len > 1500);
+    if (r2) {
       cleared = true;
-      sold = {
-        median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null,
-        sales: (r.sales || []).map((s) => ({ date: s.date, media: s.media, price: parseMoney(s.priceText) })).filter((s) => s.price != null),
-        ts: Date.now(),
-      };
-    } else {
-      // Not logged in (or the sales-history page didn't clear) -> fall back to the anonymous
-      // release-page aggregate-only scrape. No per-sale list this way, but median/low/high still
-      // work exactly as they did before the sales-history page was added.
-      await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
-      const r2 = await waitFor(cfWin, SOLD_EXTRACT, (x) => x && !x.challenged && x.len > 1500);
-      if (r2) {
-        cleared = true;
-        sold = { median: parseMoney(r2.median), low: parseMoney(r2.low), high: parseMoney(r2.high), lastSold: r2.lastSold || null, sales: [], ts: Date.now() };
-      }
+      sold = { median: parseMoney(r2.median), low: parseMoney(r2.low), high: parseMoney(r2.high), lastSold: r2.lastSold || null, sales: [], ts: Date.now() };
     }
   }
 
@@ -587,6 +648,24 @@ async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
   };
 }
 
+// Fetch the Sales History page (per-sale date/media/price list) for ONE release. GEM-ONLY: this is
+// the slow, login-gated navigation (an anonymous request redirects to login.discogs.com), so it's
+// only ever called from the post-scan gem-enrichment pass in runScrape — never from the general
+// candidate/warm-up pipeline, which uses the plain anonymous median above. Returns null when not
+// logged in / the page didn't clear, in which case the caller keeps whatever median-only reference
+// it already had. Raw (untrimmed) sales list — the caller applies engine.recentSales.
+async function fetchSalesHistory(cfWin, releaseId) {
+  await cfWin.loadURL(SALES_HISTORY_URL(releaseId), { userAgent: DISCOGS_UA }).catch(() => {});
+  const r = await waitFor(cfWin, SALES_HISTORY_EXTRACT, (x) => x && (x.loginRequired || (!x.challenged && x.len > 800)));
+  if (!r || r.loginRequired || r.challenged) return null;
+  return {
+    median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null,
+    sales: (r.sales || []).map((s) => ({ date: s.date, media: s.media, price: parseMoney(s.priceText) })).filter((s) => s.price != null),
+    salesChecked: true,
+    ts: Date.now(),
+  };
+}
+
 // One-time Discogs login — unlocks the Sales History page (SALES_HISTORY_EXTRACT above) so the
 // 💎 rare-gem display can show real recent sales instead of just the aggregate median. The hidden
 // cfWin used everywhere else in this file opens with no explicit `partition`, which means it's
@@ -625,6 +704,10 @@ function startDiscogsLogin() {
 
 async function runScrape(win, opts = {}) {
   if (scrapeRunning) throw new Error('A scan is already running.');
+  // Shared-budget guard: never sweep while the cloud scan is sweeping (see cloudScanActive above) —
+  // the caller (renderer) shows why and retries once the cloud run is done.
+  const cloudBusy = await cloudScanActive();
+  if (cloudBusy) return { postponed: true, cloudBusy };
   scrapeRunning = true;
   scrapeAbort = false;
   const send = (m) => { try { win.webContents.send('scrape:progress', m); } catch { /* window gone */ } };
@@ -637,13 +720,16 @@ async function runScrape(win, opts = {}) {
 
     const store = makeStore(stateDir());
     const scanThreshold = scanMinDiscount(config);
-    // Slightly tighter pacing than the cloud default (1100ms) for this interactive scan: 1050ms is
-    // ~57 req/min — under Discogs' 60/min cap AND clear of the client's near-empty-window guard (which
-    // would 60s-stall if `remaining` hit 1), so it shaves ~30-40s off a full sweep without risking a
-    // rate-limit stall. The cloud watcher keeps the conservative 1100ms default — its email
-    // reliability matters more there than a few seconds.
-    const client = makeClient({ token: config.token, userAgent: config.userAgent, minIntervalMs: 1050 });
+    // Same conservative pacing as the cloud (1100ms ≈ 54.5/min). This used to be 1050ms (~57/min)
+    // to shave ~35s off a sweep, but that runs remaining≈2-3 against the 60/min budget — during a
+    // 2-calls-per-release stretch (stale price suggestions) jitter dips it to 1 and the client's
+    // near-empty-window guard 60s-stalls, wiping out the gain several times over (measured live
+    // 2026-07-18: repeated burst/60s-stall cycles with no external contention).
+    const client = makeClient({ token: config.token, userAgent: config.userAgent, minIntervalMs: 1100 });
     const SOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sold-median changes slowly; reuse the weekly cache
+    // Checked once per scan: gates the POST-scan gem sales-history enrichment pass only (below) —
+    // it no longer affects the candidate/warm-up median freshness check, which stays anonymous.
+    const discogsLoggedIn = await isDiscogsLoggedIn();
 
     send({ phase: 'wantlist', checked: 0, total: 0, found: 0 });
     const wantlist = await client.getWantlist(config.username);
@@ -692,13 +778,16 @@ async function runScrape(win, opts = {}) {
     // copy we've CONFIRMED is VG+, not a price guess.
     async function confirmCandidate(c) {
       const cachedSold = store.getSoldMedian(c.rel.releaseId);
-      // A deep "full + medians" scan re-scrapes every median (ignoring the weekly cache) so all
-      // references are guaranteed current; a normal scan reuses a fresh cached median to save time.
-      // Either way, a release the interleaved warm-up ALREADY scraped this run is fresh by
-      // definition — don't pay the release-page navigation twice in one scan.
+      // Reuse a fresh cached median (the weekly TTL) — the median is sales HISTORY, it moves too
+      // slowly for a same-week re-scrape to change the verdict, and skipping the release-page
+      // navigation is the single biggest per-candidate saving. (A full-median scan used to ignore
+      // the TTL and re-scrape EVERYTHING every run — that's what made a full scan take 30-60 min
+      // even right after a previous one.) A release the interleaved warm-up ALREADY scraped this
+      // run is fresh by definition — don't pay the navigation twice in one scan. Purely median-TTL
+      // based — whether the cache carries gem sales-history (salesChecked) is irrelevant here.
       const soldFresh = scrapedThisRun.has(c.rel.releaseId)
         ? !!cachedSold
-        : (!opts.fullMedians && !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS)));
+        : !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS));
 
       let data = { cleared: false, sold: null, listings: null };
       try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency, { needSold: !soldFresh }); } catch { /* leave defaults */ }
@@ -707,14 +796,15 @@ async function runScrape(win, opts = {}) {
       // Sold-median: prefer a fresh scrape, else the weekly cache. Refresh the cache when fresh.
       // If the page cleared but the release has simply never sold, cache a null-median sentinel so the
       // warm-up below doesn't keep re-scraping it every run (only when we don't already have a real one).
+      // This is the anonymous median-only scrape (no `sales`) — preserve any per-sale list + the
+      // `salesChecked` flag a prior GEM enrichment pass may have written, so a routine median refresh
+      // can't wipe out real sales history that was fetched separately.
       let sold = cachedSold;
       if (data.sold && data.sold.median != null) {
-        // Trim the raw scraped sales list down to what the rare-gem display wants (last 10 within
-        // 2 years) before persisting — keeps the store small and every reader gets the same window.
-        sold = { ...data.sold, sales: engine.recentSales(data.sold.sales, { years: 2, limit: 10 }) };
+        sold = { ...data.sold, sales: (cachedSold && cachedSold.sales) || [], salesChecked: !!(cachedSold && cachedSold.salesChecked) };
         store.setSoldMedian(c.rel.releaseId, sold);
       }
-      else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', sales: [], ts: Date.now() }); }
+      else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', sales: [], salesChecked: false, ts: Date.now() }); }
       if (data.sold) scrapedThisRun.add(c.rel.releaseId); // got a release-page read this run -> warm-up needn't redo it
 
       const common = {
@@ -832,15 +922,25 @@ async function runScrape(win, opts = {}) {
     // yet, the browser does a warm-up probe instead of sleeping — the old serial post-pass added
     // 1.5-2 min AFTER the progress bar hit 100%; now most (often all) of it hides inside the sweep.
     // Whatever budget is left when the pipeline ends drains in a short post-pass. Quick scans skip
-    // it; "Full + medians" lifts the budget to the whole wantlist and ignores the weekly TTL.
+    // it. A full-median scan lifts the BUDGET to the whole wantlist (full coverage) but still
+    // respects the weekly TTL: only stale/never-scraped medians are (re)probed. Right after a
+    // previous full scan the queue is near-empty and the scan collapses to ≈ the API sweep alone;
+    // a week later everything has expired and one scan refreshes it all. (It used to IGNORE the
+    // TTL and force-rescrape every median — that bought nothing, sales history barely moves within
+    // a week, and cost 30-60 min per scan.)
     const WARMUP_BUDGET = opts.quick ? 0 : (opts.fullMedians ? work.length : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })());
+    // Purely median-TTL based, same as soldFresh above — gem sales-history freshness is tracked and
+    // checked separately in the post-scan enrichment pass, not here.
     const soldFreshNow = (id) => { const sm = store.getSoldMedian(id); return !!(sm && sm.ts && (Date.now() - sm.ts < SOLD_TTL_MS)); };
     const warmupQueue = WARMUP_BUDGET > 0
       ? work
-        .filter((rel) => (opts.fullMedians ? true : !soldFreshNow(rel.releaseId)))
+        .filter((rel) => !soldFreshNow(rel.releaseId))
         .sort((a, b) => { const sa = store.getSoldMedian(a.releaseId), sb = store.getSoldMedian(b.releaseId); return (sa ? sa.ts : 0) - (sb ? sb.ts : 0); }) // never-cached first, then oldest
       : [];
     let warmupIdx = 0, warmedReal = 0, warmedChecked = 0;
+    // Measured pace of the two browser workloads (a candidate confirmation ≈ 2 navigations, a
+    // warm-up probe ≈ 1) — feeds the honest ETA below. Priors cover the first few ops.
+    let candMs = 0, candOps = 0, warmMs = 0, warmOps = 0;
     const warmupTotal = Math.min(WARMUP_BUDGET, warmupQueue.length); // display estimate (skips can shrink the real count)
     // Probe ONE warm-up target (release page only, no API calls). Returns false when the queue or
     // budget is exhausted. Targets that were scraped by the pipeline mid-run — or became fresh —
@@ -850,17 +950,21 @@ async function runScrape(win, opts = {}) {
         if (scrapeAbort) return false;
         const rel = warmupQueue[warmupIdx++];
         if (scrapedThisRun.has(rel.releaseId)) continue;              // pipeline already read this release page
-        if (!opts.fullMedians && soldFreshNow(rel.releaseId)) continue; // became fresh mid-run
+        if (soldFreshNow(rel.releaseId)) continue;                    // became fresh mid-run
+        const tW = Date.now();
+        const cachedSold = store.getSoldMedian(rel.releaseId);
         let d = { cleared: false, sold: null };
         try { d = await loadReleaseData(cfWin, rel.releaseId, config.currency, { soldOnly: true }); } catch { /* transient — retry next scan */ }
         if (d.sold) scrapedThisRun.add(rel.releaseId); // a later candidate for this release needn't re-scrape
         if (d.sold && d.sold.median != null) {
-          store.setSoldMedian(rel.releaseId, { ...d.sold, sales: engine.recentSales(d.sold.sales, { years: 2, limit: 10 }) });
+          // Anonymous median-only scrape — preserve any gem-fetched sales history rather than wipe it.
+          store.setSoldMedian(rel.releaseId, { ...d.sold, sales: (cachedSold && cachedSold.sales) || [], salesChecked: !!(cachedSold && cachedSold.salesChecked) });
           warmedReal++;
         }
-        else if (d.cleared && d.sold) { store.setSoldMedian(rel.releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', sales: [], ts: Date.now() }); }
+        else if (d.cleared && d.sold) { store.setSoldMedian(rel.releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', sales: [], salesChecked: false, ts: Date.now() }); }
         warmedChecked++;
         await sleep(300);
+        warmMs += Date.now() - tW; warmOps++;
         return true;
       }
       return false;
@@ -875,7 +979,28 @@ async function runScrape(win, opts = {}) {
     let producerDone = false;
     let wake = null; // resolver to wake the consumer when a candidate arrives or the producer finishes
     let scanned = 0; // releases stats-checked (Phase 1 progress)
-    const progress = () => send({ phase: 'scan', checked: scanned, total, found: deals.length, candidates: candidateCount, processed: priced, queued: queue.length });
+
+    // Honest ETA — the old renderer-side guess (remaining × 1.05s) modeled ONLY the API sweep and
+    // was off by 3-4× whenever the browser lane dominated (many candidates / a big warm-up queue)
+    // or the sweep needed a second API call per release (stale price-suggestions week). Instead,
+    // MEASURE both lanes and report the slower one: they run concurrently, so the scan ends when
+    // the longest lane does. The API pace comes from wall-clock elapsed / releases swept (which
+    // automatically absorbs the suggestion calls); the browser lane is its backlog (queued + not
+    // yet discovered candidates, extrapolated from the hit-rate so far, plus the remaining warm-up
+    // queue) at the measured per-op pace.
+    const scanStart = Date.now();
+    const paceOf = (ms, ops, prior) => (ops >= 2 ? ms / ops : prior);
+    const etaMs = () => {
+      const apiRemaining = Math.max(0, total - scanned);
+      const apiPace = scanned >= 5 ? (Date.now() - scanStart) / scanned : 1300;
+      const candBacklog = Math.max(0, candidateCount - priced);
+      const expectedMore = scanned >= 10 ? (candidateCount / scanned) * apiRemaining : 0;
+      const warmRemaining = Math.max(0, Math.min(WARMUP_BUDGET - warmedChecked, warmupQueue.length - warmupIdx));
+      const browserLane = (candBacklog + expectedMore) * paceOf(candMs, candOps, 8000)
+        + warmRemaining * paceOf(warmMs, warmOps, 4500);
+      return Math.round(Math.max(apiRemaining * apiPace, browserLane));
+    };
+    const progress = () => send({ phase: 'scan', checked: scanned, total, found: deals.length, candidates: candidateCount, processed: priced, queued: queue.length, etaMs: etaMs() });
 
     const consumer = (async () => {
       for (;;) {
@@ -890,7 +1015,9 @@ async function runScrape(win, opts = {}) {
           continue;
         }
         const c = queue.shift();
+        const tC = Date.now();
         try { await confirmCandidate(c); } catch { /* one candidate failing must not stop the drain */ }
+        candMs += Date.now() - tC; candOps++;
         priced++;
         progress();
       }
@@ -963,9 +1090,37 @@ async function runScrape(win, opts = {}) {
     // Drain whatever warm-up budget the interleaved probes didn't get through during the pipeline
     // (on a candidate-heavy scan the consumer had little idle time). Often this is already empty.
     if (!scrapeAbort && warmedChecked < WARMUP_BUDGET && warmupIdx < warmupQueue.length) {
-      send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length });
+      send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length, etaMs: etaMs() });
       while (!scrapeAbort && await warmupNext()) {
-        send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length });
+        send({ phase: 'warmup', checked: warmedChecked, total: warmupTotal, found: deals.length, etaMs: etaMs() });
+      }
+    }
+
+    // --- Gem sales-history enrichment — ACHTERAF, GEMS ONLY ---------------------------------------
+    // The per-sale Sales History page is the slow, login-gated navigation, so it's worth paying for
+    // ONLY the handful of releases that turned out to be rare gems THIS scan (0-for-sale -> first
+    // copy) — never for the whole candidate/warm-up pipeline, which stays on the fast anonymous
+    // median above. Runs after everything else so gemsFound is final and the browser window is free.
+    // Skips a gem whose cached median is already salesChecked-fresh (same weekly TTL as the median).
+    let gemsEnriched = 0;
+    if (!scrapeAbort && discogsLoggedIn && gemsFound.length) {
+      send({ phase: 'gems', checked: 0, total: gemsFound.length, found: deals.length });
+      for (const gem of gemsFound) {
+        if (scrapeAbort) break;
+        const cached = store.getSoldMedian(gem.releaseId);
+        if (cached && cached.salesChecked && cached.ts && (Date.now() - cached.ts < SOLD_TTL_MS)) continue;
+        let sh = null;
+        try { sh = await fetchSalesHistory(cfWin, gem.releaseId); } catch { /* keep the median-only reference */ }
+        if (sh) {
+          store.setSoldMedian(gem.releaseId, sh);
+          const trimmed = engine.recentSales(sh.sales, { years: 2, limit: 10 });
+          gem.recentSales = trimmed.length ? trimmed : null;
+          if (sh.median != null && gem.referenceSource !== 'sold-median') { gem.reference = sh.median; gem.referenceSource = 'sold-median'; }
+          store.addGem(gem); // re-persist the enriched card (replaces the plain one for this releaseId)
+          gemsEnriched++;
+        }
+        await sleep(300); // be gentle on Discogs/Cloudflare between releases
+        send({ phase: 'gems', checked: gemsEnriched, total: gemsFound.length, found: deals.length });
       }
     }
 
@@ -1020,8 +1175,8 @@ async function runScrape(win, opts = {}) {
       }
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, gems: gemsFound.length, zeroWatch: zeroWatchOut.length, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
-    return { deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
+    send({ phase: 'done', checked: total, total, found: deals.length, gems: gemsFound.length, gemsEnriched, zeroWatch: zeroWatchOut.length, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
+    return { deals, nearMisses: nearMissOut, gems: gemsFound, gemsEnriched, zeroWatch: zeroWatchOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, cfFailed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
@@ -1490,6 +1645,14 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   mainWindow = win;
+  // Closing the MAIN window = quitting the app. Without this, a hidden helper window (the
+  // Cloudflare scan window during an auto-scan, or a Discogs login window) keeps the process
+  // alive headless after the user closes the app; that zombie then owns the single-instance
+  // lock, and the next launch makes IT crash with "Object has been destroyed".
+  win.on('closed', () => {
+    mainWindow = null;
+    if (process.platform !== 'darwin') app.quit();
+  });
   win.removeMenu();
   win.loadFile('index.html');
   // Show only once painted, to avoid the white flash (same pattern as BPM Tapper).
@@ -1504,9 +1667,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
+    // Guard against a destroyed window: touching it throws "Object has been destroyed" in an
+    // app-level handler, which surfaces as a crash dialog. If the window is gone but the process
+    // survived (see the closed-handler note in createWindow), reopen it instead.
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
+    } else {
+      createWindow();
     }
   });
   app.whenReady().then(createWindow);

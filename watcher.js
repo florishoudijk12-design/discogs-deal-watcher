@@ -429,7 +429,10 @@ if (require.main === module && process.argv.includes('--itest')) {
     assert.strictEqual(r3.gem, null, 'obs6: sold out again');
     r3 = await processRelease(rel3, deps3);
     assert.ok(r3.gem, 'obs7: a NEW appearance after the cooldown fires again');
-    assert.strictEqual(store.countGems(), 2, 'two gems recorded for the dashboard feed');
+    // The feed keeps ONE card per release: the re-appearance replaced the older gem (no
+    // duplicate cards when a listing flaps 0<->1), and the stored card is the newest event.
+    assert.strictEqual(store.countGems(), 1, 'the re-appearance replaced the older gem in the feed');
+    assert.strictEqual(store.getGems()[0].lowest, 55, 'the stored card is the newest event');
 
     // Discogs sometimes has no price suggestion. Cache that absence too, otherwise every sweep
     // repeats an API request that cannot improve the result.

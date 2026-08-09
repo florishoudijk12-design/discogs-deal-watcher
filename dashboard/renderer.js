@@ -31,6 +31,7 @@ const DEMO_GEMS = {
   gems: [
     { id: 'dg1', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 95, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'sold-median', recentSales: [{ date: '2026-05-24', price: 165, media: 'NM' }, { date: '2025-07-27', price: 100, media: 'VG' }, { date: '2024-12-31', price: 141.23, media: 'NM' }], url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 12 * 60000, thumb: '' },
     { id: 'dg2', releaseId: 2222, artist: 'Squash Gang', title: 'I Want An Illusion', lowest: 40, currency: 'EUR', numForSale: 2, reference: null, referenceSource: null, url: 'https://www.discogs.com/sell/release/2222?sort=price%2Casc', ts: Date.now() - 3 * 3600000, thumb: '' },
+    { id: 'dg3', releaseId: 6666, artist: 'Vinicio', title: 'Dance You And Me', lowest: 79.99, currency: 'EUR', numForSale: 1, reference: 42.5, referenceSource: 'sold-median', gone: true, url: 'https://www.discogs.com/sell/release/6666?sort=price%2Casc', ts: Date.now() - 26 * 3600000, thumb: '' },
   ],
   zeroWatch: [
     { releaseId: 3333, artist: 'Fockewulf 190', title: 'Body Heat', year: 1984 },
@@ -401,21 +402,25 @@ function gemCard(g) {
   const ref = recentSales || (g.reference != null
     ? `<div class="ref">worth ~${money(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})</div>` : '');
   // Live verification (same pipeline as the deals): still for sale, and in what condition?
-  const live = g.gone
-    ? `<span class="tag gone" title="The live marketplace check no longer finds any copy for sale">⌛ no longer listed</span>`
-    : (g.verified && g.currentMedia
-        ? `<span class="tag good" title="Confirmed from the live marketplace listing">✓ media ${esc(gradeShort(g.currentMedia))}${g.currentLowest != null && g.currentLowest !== g.lowest ? ` · now ${money(g.currentLowest, g.currency)}` : ''}</span>`
-        : '');
+  // A gone gem gets a full-width banner, not a subtle tag — a sold/delisted copy must never
+  // look buyable at a glance (gone comes from the scan history AND the live verify).
+  const live = !g.gone && g.verified && g.currentMedia
+    ? `<span class="tag good" title="Confirmed from the live marketplace listing">✓ media ${esc(gradeShort(g.currentMedia))}${g.currentLowest != null && g.currentLowest !== g.lowest ? ` · now ${money(g.currentLowest, g.currency)}` : ''}</span>`
+    : '';
+  const goneBanner = g.gone
+    ? `<div class="gem-gone-banner" title="No copy is for sale anymore — it was sold or the seller delisted it">⌛ NO LONGER LISTED — sold or delisted</div>`
+    : '';
   return `<article class="card is-gem${g.gone ? ' is-gone' : ''}">
     <span class="when">${g.ts ? ago(g.ts) : ''}</span>
     ${thumb}
     <div class="body">
       <p class="title">${esc(g.title || 'Release ' + g.releaseId)}</p>
       <p class="artist">${esc(g.artist || '')}${g.year ? ` · ${esc(String(g.year))}` : ''}</p>
+      ${goneBanner}
       <div class="meta"><span class="tag gem">💎 was 0 for sale — ${appeared}</span>${live}</div>
-      <div class="price-row"><span class="price gem-price">${money(g.lowest, g.currency)}</span><span class="gem-ask">asking price — unfiltered</span></div>
+      <div class="price-row"><span class="price gem-price">${money(g.lowest, g.currency)}</span><span class="gem-ask">${g.gone ? 'was asking — gone now' : 'asking price — unfiltered'}</span></div>
       ${ref}
-      <button class="buy gembuy" data-url="${esc(g.url)}">View &amp; buy on Discogs &rarr;</button>
+      <button class="buy gembuy" data-url="${esc(g.url)}">${g.gone ? 'View release on Discogs &rarr;' : 'View &amp; buy on Discogs &rarr;'}</button>
     </div>
   </article>`;
 }
@@ -825,8 +830,12 @@ async function refresh() {
 }
 
 // --- Local "Scan now" full sweep ---
-function fmtEta(remaining) {
-  const secs = Math.round(remaining * 1.05); // ~1.05s per release at the scan's tightened pacing (1050ms)
+// The ETA is MEASURED in main.js (both the API sweep and the browser lane — see etaMs in runScrape)
+// and arrives as m.etaMs; this only formats it. The old renderer-side guess (remaining × 1.05s)
+// modeled only the API sweep and was wildly off whenever the browser work dominated.
+function fmtEta(ms) {
+  if (ms == null || !isFinite(ms)) return '';
+  const secs = Math.max(0, Math.round(ms / 1000));
   if (secs < 60) return `~${secs}s left`;
   return `~${Math.ceil(secs / 60)} min left`;
 }
@@ -840,14 +849,19 @@ function setScanUI(on) {
   if (on) setServiceBadge(lastHealth); else refreshHealth();
 }
 
+let scanRetryTimer = null; // pending retry after a cloud-busy postponement (one at a time)
+
 async function startScan(opts = {}) {
   if (!hasApi) { alert('Local scan needs the desktop app (run it with npm start).'); return; }
   if (scanning) return;
+  if (scanRetryTimer) { clearTimeout(scanRetryTimer); scanRetryTimer = null; }
   setScanUI(true);
   $('scan-fill').style.width = '0%';
   $('scan-text').textContent = opts.quick ? 'Ranking your wantlist for a quick scan…' : 'Fetching your wantlist…';
+  let postponed = null; // cloud-busy postponement — handled after the UI unlock below
   try {
     const res = await window.api.scrapeRun(opts);
+    if (res && res.postponed) { postponed = res; } else {
     // A BACKGROUND auto-scan in a cloud source (github/server) runs only for its side effects —
     // refreshing sold-medians (which sharpen the cloud emails) and keeping the cron alive. It must
     // NOT hijack the view: the cloud feed (now auto-verified live) stays the shown truth, so a
@@ -876,11 +890,22 @@ async function startScan(opts = {}) {
       refreshGems(); // the scan may have found rare gems / refreshed the zero-stock watch list
       render();
     }
+    }
   } catch (e) {
     $('empty').classList.remove('hidden');
     $('empty').textContent = 'Scan failed: ' + e.message;
   } finally {
     setScanUI(false);
+  }
+  // Postponed: the cloud scan is sweeping right now, and both share ONE Discogs rate budget —
+  // running them together makes each take hours (seen live 2026-07-18). Keep the bar visible with
+  // the reason, and retry every few minutes; the scan starts the moment the cloud run is done.
+  if (postponed) {
+    const mins = postponed.cloudBusy && postponed.cloudBusy.endsInMs ? Math.ceil(postponed.cloudBusy.endsInMs / 60000) : null;
+    $('scanbar').classList.remove('hidden');
+    $('scan-fill').style.width = '0%';
+    $('scan-text').textContent = `☁ The cloud scan is running right now — scanning locally at the same time would make both crawl (they share your Discogs rate limit). Your scan starts automatically when it finishes${mins ? ` (~${mins} min)` : ''}.`;
+    scanRetryTimer = setTimeout(() => { scanRetryTimer = null; $('scanbar').classList.add('hidden'); startScan(opts); }, 3 * 60_000);
   }
 }
 
@@ -916,10 +941,16 @@ function onScanProgress(m) {
   }
   if (m.phase === 'warmup') {
     $('scan-fill').style.width = '100%';
-    $('scan-text').textContent = `Refreshing sold-medians ${m.checked}/${m.total}… (real market value — also sharpens cloud emails)`;
+    const eta = fmtEta(m.etaMs);
+    $('scan-text').textContent = `Refreshing sold-medians ${m.checked}/${m.total}…${eta ? ` ${eta} ·` : ''} (real market value — also sharpens cloud emails)`;
     return;
   }
   if (m.phase === 'pushing') { $('scan-text').textContent = 'Saving sold-medians to GitHub for the email watcher…'; return; }
+  if (m.phase === 'gems') {
+    $('scan-fill').style.width = '100%';
+    $('scan-text').textContent = `Checking recent sales for rare gems ${m.checked}/${m.total}…`;
+    return;
+  }
   if (m.phase === 'done') {
     $('scan-fill').style.width = '100%';
     const dropped = m.droppedNoVgPlus ? ` · ${m.droppedNoVgPlus} skipped (no VG+ copy)` : '';
@@ -948,9 +979,10 @@ function onScanProgress(m) {
   $('scan-fill').style.width = pctDone + '%';
   const found = m.found || 0;
   const remaining = Math.max(0, (m.candidates || 0) - (m.processed || 0));
+  const eta = fmtEta(m.etaMs);
   const tail = (m.checked >= total && remaining > 0)
-    ? ` · confirming last ${remaining}`
-    : ` · ${fmtEta(total - m.checked)}`;
+    ? ` · confirming last ${remaining}${eta ? ` · ${eta}` : ''}`
+    : (eta ? ` · ${eta}` : '');
   $('scan-text').textContent = `Scanning ${m.checked}/${total} · ${found} deal${found === 1 ? '' : 's'}${tail}`;
 }
 
