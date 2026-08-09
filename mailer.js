@@ -55,6 +55,15 @@ function dealLine(d) {
   // it leads. When the reference is the REAL sold price the deal is high-trust; against the VG+
   // suggestion it's an estimate to verify on the page.
   if (d.freshListing) flags.push('🆕 just listed');
+  const exact = d.listingHistory;
+  const market = d.marketHistory;
+  if (exact && exact.priceDropped) {
+    flags.push(`📉 listing price dropped ${fmtPrice(exact.previousPrice, d.currency)} → ${fmtPrice(exact.currentPrice, d.currency)} (-${pct(exact.dropPct)})`);
+  } else if (market && market.priceDropped) {
+    // Honest wording for the API-only cloud path: this may be an edited listing or a new cheap copy.
+    flags.push(`📉 marketplace low fell ${fmtPrice(market.previousLowest, d.currency)} → ${fmtPrice(market.currentLowest, d.currency)} (-${pct(market.dropPct)})`);
+  }
+  if (exact && exact.relisted) flags.push('↻ same listing relisted');
   if (d.referenceSource !== 'sold-median') flags.push('≈ value is Discogs’ estimate — confirm on the page');
   // The cloud (API-only) path can't see condition, so the only honest condition signal is the
   // price-proxy "suspiciously low" flag. (The 0/2–2/2 "confidence" number was just reference
@@ -268,16 +277,20 @@ module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPay
 if (require.main === module && process.argv.includes('--selftest')) {
   const assert = require('assert');
   const m = renderDealsEmail([
-    { releaseId: 1, artist: 'Imagination', title: 'Night Dubbing', lowest: 8, currency: 'EUR', reference: 30, referenceSource: 'sold-median', discount: 0.73, numForSale: 12, freshListing: true, suspicious: false, url: 'https://www.discogs.com/sell/release/1?sort=price%2Casc' },
+    { releaseId: 1, artist: 'Imagination', title: 'Night Dubbing', lowest: 8, currency: 'EUR', reference: 30, referenceSource: 'sold-median', discount: 0.73, numForSale: 12, freshListing: true, suspicious: false, marketHistory: { previousLowest: 12, currentLowest: 8, dropPct: 1 / 3, priceDropped: true }, url: 'https://www.discogs.com/sell/release/1?sort=price%2Casc' },
     { releaseId: 2, artist: 'Klein & MBO', title: 'Dirty Talk', lowest: 4, currency: 'EUR', reference: 25, referenceSource: 'trailing-median', discount: 0.84, numForSale: 3, suspicious: true, url: 'https://www.discogs.com/sell/release/2?sort=price%2Casc' },
   ]);
   assert.ok(/2 Discogs deals/.test(m.subject), 'subject counts deals');
   assert.ok(/Imagination/.test(m.html) && /Dirty Talk/.test(m.html), 'both deals rendered');
   assert.ok(/may be below VG\+/.test(m.html), 'suspicious flag shown');
   assert.ok(/just listed/.test(m.html), 'fresh-listing flag shown (the live signal)');
+  assert.ok(/marketplace low fell.*€12\.00.*€8\.00/.test(m.text), 'aggregate cloud price drop is explained honestly');
   assert.ok(/real sold price/.test(m.html), 'a sold-median deal is labelled "real sold price"');
   assert.ok(/estimate/.test(m.text), 'a non-sold-median deal warns the value is an estimate');
   assert.ok(/€8\.00/.test(m.html) && /€4\.00/.test(m.html), 'prices formatted');
+  const exactDrop = dealLine({ currency: 'EUR', listingHistory: { previousPrice: 42, currentPrice: 31, dropPct: 11 / 42, priceDropped: true, relisted: true } });
+  assert.ok(exactDrop.flags.some((flag) => /listing price dropped.*€42\.00.*€31\.00/.test(flag)), 'exact desktop listing drop is labelled');
+  assert.ok(exactDrop.flags.some((flag) => /same listing relisted/.test(flag)), 'exact same-item relist is labelled');
   assert.ok(m.text.includes('Buy: https://www.discogs.com/sell/release/1'), 'text has buy link');
 
   // --- rare-gem email ---

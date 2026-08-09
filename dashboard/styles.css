@@ -208,6 +208,7 @@ input[type="range"] { accent-color: var(--accent); }
 .tag.fresh { color: #06210f; background: var(--green); border-color: var(--green); font-weight: 700; }
 /* Confirmed VG+ (or better): a real, verified grade read off the live listing. */
 .tag.good { color: var(--green); border-color: #1f5135; font-weight: 650; }
+.tag.history { color: #7dd3fc; border-color: #24566d; }
 .card.is-fresh { border-color: #2c6b46; box-shadow: 0 0 0 1px #2ecc7133, 0 6px 18px -8px #1fae5e55; }
 /* A scan-confirmed (condition-verified) deal gets a subtle green left edge. */
 .card.is-verified { border-left: 3px solid var(--green); }

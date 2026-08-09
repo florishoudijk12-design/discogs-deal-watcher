@@ -409,6 +409,28 @@ function isFreshListing(prevObs, curObs) {
 }
 
 /*
+ * Aggregate price movement exposed by the official API. This is deliberately called a market-low
+ * movement, not a listing edit: without an itemId the cloud cannot prove whether the same seller
+ * changed a price or a different, cheaper copy appeared.
+ */
+function lowestPriceMovement(prevObs, curObs) {
+  const previousLowest = prevObs ? num(prevObs.lowest) : null;
+  const currentLowest = curObs ? num(curObs.lowest) : null;
+  if (previousLowest == null || previousLowest <= 0 || currentLowest == null || currentLowest <= 0) return null;
+  const priceDropped = currentLowest < previousLowest;
+  const priceRaised = currentLowest > previousLowest;
+  return {
+    previousLowest,
+    currentLowest,
+    dropAmount: priceDropped ? Math.round((previousLowest - currentLowest) * 100) / 100 : null,
+    dropPct: priceDropped ? (previousLowest - currentLowest) / previousLowest : null,
+    priceDropped,
+    priceRaised,
+    observedAt: curObs.ts || null,
+  };
+}
+
+/*
  * isRareAppearance(prevObs, curObs) — the RARE-GEM event: a release that had ZERO copies for
  * sale just got its first one. For a hard-to-find record this is the highest-value signal there
  * is — price is irrelevant (the alert fires regardless; the user judges value themselves).
@@ -504,6 +526,7 @@ module.exports = {
   dealValueScore,
   shouldFire,
   isFreshListing,
+  lowestPriceMovement,
   isRareAppearance,
   recentSales,
   releaseWatchScore,
@@ -536,6 +559,15 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(!meetsCondition('VG'), 'VG does NOT meet VG+');
   assert.ok(!meetsCondition('Good (G)'), 'G does not meet VG+');
   assert.ok(!meetsCondition(null), 'unknown does not meet VG+');
+
+  // Aggregate price movement: honest release-level wording for the cloud path.
+  let movement = lowestPriceMovement({ lowest: 42, ts: 1 }, { lowest: 31, ts: 2 });
+  assert.ok(movement.priceDropped && !movement.priceRaised, 'detects a lower marketplace floor');
+  assert.strictEqual(movement.dropAmount, 11, 'market-low drop amount');
+  assert.ok(Math.abs(movement.dropPct - 11 / 42) < 1e-9, 'market-low drop percentage');
+  movement = lowestPriceMovement({ lowest: 31 }, { lowest: 35 });
+  assert.ok(movement.priceRaised && !movement.priceDropped, 'distinguishes a rising floor');
+  assert.strictEqual(lowestPriceMovement({ lowest: null }, { lowest: 10 }), null, 'no invented movement without two prices');
 
   // Deal: 50% under median, VG+, with shipping.
   let r = evaluateDeal({ price: 8, shipping: 2, condition: 'VG+' }, { reference: 30, minDiscount: 0.5 });

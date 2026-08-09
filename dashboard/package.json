@@ -24,6 +24,7 @@
       "git-policy.js",
       "median-publisher.js",
       "runtime-policy.js",
+      "listing-history.js",
       "preload.js",
       "renderer.js",
       "index.html",

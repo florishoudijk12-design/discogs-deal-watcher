@@ -116,6 +116,7 @@ async function processRelease(rel, deps) {
   const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
   store.pushObservation(rel.releaseId, curObs);
   const freshListing = engine.isFreshListing(prevObs, curObs);
+  const marketHistory = engine.lowestPriceMovement(prevObs, curObs);
   const rareAppearance = config.rareGems !== false && engine.isRareAppearance(prevObs, curObs);
 
   // Cached, weekly-refreshed price suggestions (token required; ignore failures).
@@ -224,6 +225,8 @@ async function processRelease(rel, deps) {
     confidence: sig.confidence,
     suspicious: sig.suspicious,
     freshListing,
+    // Aggregate API signal only: the cloud cannot prove which exact listing changed without itemId.
+    marketHistory,
     url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
     releaseUrl: engine.releaseUrl(rel.releaseId),
     ts: Date.now(),
@@ -358,6 +361,9 @@ if (require.main === module && process.argv.includes('--itest')) {
     assert.ok(dip, 'genuine new-low trustworthy dip fires');
     assert.ok(dip.ownDrop > 0.4, 'dip is well under its own usual lowest');
     assert.ok(!dip.suspicious, '12 is above the VG suggestion 10 -> priced like a real copy, not worn/suspicious');
+    assert.strictEqual(dip.marketHistory.previousLowest, 25, 'deal explains the prior marketplace low');
+    assert.strictEqual(dip.marketHistory.currentLowest, 12, 'deal explains the new marketplace low');
+    assert.ok(dip.marketHistory.priceDropped, 'deal is explicitly tagged as a marketplace-low drop');
     assert.strictEqual(store.getAlerted(555), null, 'detection does not acknowledge a notification');
     store.ackPendingAlert(dipResult.pending.find((item) => item.kind === 'deal').id);
     assert.strictEqual(store.getAlerted(555).lowest, 12, 'delivery acknowledgement updates deal dedupe');

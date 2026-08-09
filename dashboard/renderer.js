@@ -187,6 +187,8 @@ function applyVerify(results) {
       shipping: cur.shipping, shippingSource: cur.shippingSource, shipsFrom: cur.shipsFrom || d.shipsFrom,
       vgPlusCount: r.vgPlusCount, copiesSeen: copies,
       listingUrl: cur.url || d.listingUrl || null, url: cur.url || d.url,
+      listingId: cur.itemId ?? d.listingId ?? null,
+      listingHistory: cur.history || d.listingHistory || null,
       altGrade: alt ? alt.media : null, altPrice: alt ? (alt.price != null ? alt.price + (alt.shipping || 0) : null) : null, altUrl: alt ? alt.url : null,
     };
   });
@@ -268,6 +270,30 @@ function sparkline(spark) {
   </svg>`;
 }
 
+function priceHistoryDisplay(d) {
+  const exact = d.listingHistory;
+  if (exact && exact.priceDropped) {
+    const percent = exact.dropPct != null ? ` (-${pct(exact.dropPct)})` : '';
+    return `<div class="note drop">📉 This exact listing dropped ${money(exact.previousPrice, d.currency)} → ${money(exact.currentPrice, d.currency)}${percent}</div>`;
+  }
+  if (d.marketHistory && d.marketHistory.priceDropped) {
+    const h = d.marketHistory;
+    const percent = h.dropPct != null ? ` (-${pct(h.dropPct)})` : '';
+    return `<div class="note drop">📉 Marketplace low fell ${money(h.previousLowest, d.currency)} → ${money(h.currentLowest, d.currency)}${percent}</div>`;
+  }
+  return '';
+}
+
+function listingHistoryTags(d) {
+  const h = d.listingHistory;
+  if (!h) return '';
+  const relisted = h.relisted ? '<span class="tag history">↻ relisted</span>' : '';
+  const tracked = h.seenCount > 1
+    ? `<span class="tag history" title="This exact Discogs listing has been seen ${esc(String(h.seenCount))} times">tracked ${esc(String(h.seenCount))}×</span>`
+    : '';
+  return `${relisted}${tracked}`;
+}
+
 function card(d) {
   const fresh = d.freshListing ? `<span class="tag fresh">🆕 just listed</span>` : '';
   const isHidden = dismissed.has(String(d.releaseId));
@@ -275,6 +301,8 @@ function card(d) {
     ? `<button class="dismiss restore" data-rid="${esc(String(d.releaseId))}" title="Restore this deal">↩</button>`
     : `<button class="dismiss" data-rid="${esc(String(d.releaseId))}" title="Hide this deal">×</button>`;
   const spark = sparkline(d.spark);
+  const priceHistory = priceHistoryDisplay(d);
+  const historyTags = listingHistoryTags(d);
   const ships = d.shipsFrom ? `<span class="tag">from ${esc(d.shipsFrom)}</span>` : '';
   const thumb = d.thumb
     ? `<img class="thumb" src="${esc(d.thumb)}" alt="" referrerpolicy="no-referrer" />`
@@ -320,9 +348,10 @@ function card(d) {
       <div class="subprice ${d._shipReal ? 'ship-real' : 'ship-est'}" title="${shipTitle}">${shipNote}</div>
       <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${d.soldLow != null && d.soldHigh != null ? ` (${money(d.soldLow, d.currency)}–${money(d.soldHigh, d.currency)})` : ''}${save} · ${forSale}</div>
       ${cluster}
+      ${priceHistory}
       ${worn}
       ${alt}
-      <div class="meta">${gone}${fresh}${conditionChip(d)}${ships}</div>
+      <div class="meta">${gone}${fresh}${conditionChip(d)}${ships}${historyTags}</div>
       <button class="buy" data-url="${esc(d.url)}">${buyLabel}</button>
     </div>
   </article>`;

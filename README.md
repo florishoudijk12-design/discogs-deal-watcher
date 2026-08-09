@@ -52,6 +52,11 @@ call it can and is honest about the uncertainty:
   a hint the cheapest copy might be a low-grade copy, since the API won't tell us its condition.
 - The email/dashboard link opens the release marketplace **sorted price-ascending**, so the cheap
   copy is the first row — you confirm its real condition + shipping there in one click.
+- **Price-drop history.** Cloud alerts say when the release's marketplace low moved (for example
+  `€42 → €31`) without pretending the aggregate API identifies a seller. The desktop scanner can
+  see Discogs `itemId`s and therefore tracks the **exact copy** across scans: price edits, relists,
+  first/last seen time and observation count survive app restarts in `state/listing-history.json`.
+  Capped marketplace responses are never treated as proof that an unseen listing disappeared.
 
 ### Calibration (`mode`) — why a naive rule floods you
 
@@ -146,6 +151,7 @@ exclusion that could kill the once-in-a-lifetime steal:
 | `engine.js` | pure decision logic (condition grading, `evaluateMarketSignal`, dedupe, URLs) | `node engine.js --selftest` |
 | `discogs.js` | official-API client (wantlist, stats, suggestions, release), rate-limit aware | `node discogs.js --selftest` |
 | `store.js` | JSON-file store (history / alert memory / suggestions / deals) | `node store.js --selftest` |
+| `dashboard/listing-history.js` | durable exact-copy price/relist history for desktop scans | `node dashboard/listing-history.js --selftest` |
 | `mailer.js` | Gmail SMTP + HTML deal-email renderer | `node mailer.js --selftest` |
 | `server.js` | tiny token-protected read API for the dashboard | — |
 | `watcher.js` | the paced sweep loop tying it together | `node watcher.js --itest` |

@@ -22,6 +22,7 @@ const { scanMinDiscount, parseMoney, evaluateScanPreliminary } = require('./scan
 const { filterRealMedians } = require('./git-policy');
 const { makeMedianPublisher } = require('./median-publisher');
 const { dedupeGems, cloudBusyFromRun, estimateScanEta } = require('./runtime-policy');
+const { makeListingHistory } = require('./listing-history');
 
 // Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
 //   • dev run  — one level up, in the project checkout.
@@ -37,6 +38,23 @@ const WATCHER_DIR = app.isPackaged
 function dataDir() { return app.isPackaged ? app.getPath('userData') : WATCHER_DIR; }
 function configPath() { return path.join(dataDir(), 'config.json'); }
 function stateDir() { return path.join(dataDir(), 'state'); }
+
+// Exact per-copy history is a dashboard enhancement. If its separate cache is corrupt/unwritable,
+// scans still run normally; the core deal state and notifications must never depend on this UI data.
+let listingHistoryStore = null;
+let listingHistoryDisabled = false;
+function observeListings(releaseId, listings, totalCount, ts = Date.now()) {
+  if (listingHistoryDisabled || !Array.isArray(listings)) return {};
+  try {
+    if (!listingHistoryStore) listingHistoryStore = makeListingHistory(stateDir());
+    const complete = totalCount != null && Number.isFinite(Number(totalCount)) && Number(totalCount) <= listings.length;
+    return listingHistoryStore.observeRelease(releaseId, listings, { ts, complete });
+  } catch (error) {
+    listingHistoryDisabled = true;
+    console.warn('Listing history disabled for this session:', error.message || error);
+    return {};
+  }
+}
 
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
 // Defaults for a fresh, shareable install: no cloud is configured, so the LOCAL SCAN is the deal
@@ -786,6 +804,7 @@ async function runScrape(win, opts = {}) {
         numForSale: c.stats.numForSale,
         soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
         freshListing: c.freshListing,
+        marketHistory: c.marketHistory || null,
         scanThreshold,
         // Recent lowest-price trail (oldest -> newest) for the dashboard sparkline.
         spark: store.getHistory(c.rel.releaseId).slice(-12).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0),
@@ -793,6 +812,7 @@ async function runScrape(win, opts = {}) {
       };
 
       if (Array.isArray(data.listings)) {
+        const listingMovements = observeListings(c.rel.releaseId, data.listings, data.totalCount);
         // We have the real listings -> pick the cheapest copy that is actually VG+ or better.
         const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
         if (!pick.best) {
@@ -808,6 +828,7 @@ async function runScrape(win, opts = {}) {
           return;
         }
         const best = pick.best;
+        const exactHistory = best.itemId != null ? listingMovements[String(best.itemId)] || null : null;
         const sig = engine.evaluateMarketSignal({
           lowest: best.price,
           soldMedian: sold ? sold.median : null,
@@ -836,6 +857,7 @@ async function runScrape(win, opts = {}) {
             cheaperWornCondition: cheaperWorn ? pick.cheapestAny.media : null,
             ownDrop: sig.ownDrop, impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn, suspicious: sig.suspicious,
             listingUrl: best.url, url: best.url || marketUrl(c.rel.releaseId),
+            listingId: best.itemId ?? null, listingHistory: exactHistory,
           });
           confirmed++;
           if (best.shipping != null) realShip++;
@@ -1043,7 +1065,7 @@ async function runScrape(win, opts = {}) {
           }
           const prelim = evaluateScanPreliminary({ engine, store, rel, stats, suggestion: sug, config });
           if (prelim.meetsThreshold) {
-            queue.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs) });
+            queue.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs), marketHistory: engine.lowestPriceMovement(prevObs, curObs) });
             candidateCount++;
             if (wake) { wake(); wake = null; } // wake the consumer if it was idle
           }
@@ -1161,12 +1183,13 @@ const VERIFY_TTL_MS = 30 * 60 * 1000;
 const verifyCache = new Map(); // releaseId -> { ts, cheapest, bestVgPlus, copies, vgPlusCount, error }
 
 // Trim a selectByCondition copy to the fields the renderer needs (plus a direct buy link).
-const trimCopy = (c) => (c ? {
+const trimCopy = (c, history = null) => (c ? {
   itemId: c.itemId ?? null, price: c.price ?? null, currency: c.currency || null,
   media: c.media || null, sleeve: c.sleeve || null,
   shipping: c.shipping ?? null, shippingSource: c.shippingSource || null,
   shipsFrom: c.shipsFrom || null,
   url: c.url || (c.itemId ? `https://www.discogs.com/sell/item/${c.itemId}` : null),
+  history,
 } : null);
 
 async function runVerify(win, items) {
@@ -1206,14 +1229,15 @@ async function runVerify(win, items) {
       try {
         const data = await loadReleaseData(cfWin, w.releaseId, w.currency, { needSold: false });
         if (Array.isArray(data.listings)) {
+          const listingMovements = observeListings(w.releaseId, data.listings, data.totalCount, r.ts);
           const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
           r.copies = pick.totalCount != null ? pick.totalCount : data.listings.length;
           r.vgPlusCount = pick.acceptableCount != null ? pick.acceptableCount : null;
           // cheapestAny is ordered by TOTAL (price+shipping) — the best actual buy. For the
           // "is the alerted price still listed?" question we need the lowest bare ITEM price.
           r.lowestPrice = data.listings.reduce((m, l) => (l.price != null && l.price > 0 && (m == null || l.price < m) ? l.price : m), null);
-          r.cheapest = trimCopy(pick.cheapestAny);
-          r.bestVgPlus = trimCopy(pick.best);
+          r.cheapest = trimCopy(pick.cheapestAny, pick.cheapestAny && pick.cheapestAny.itemId != null ? listingMovements[String(pick.cheapestAny.itemId)] || null : null);
+          r.bestVgPlus = trimCopy(pick.best, pick.best && pick.best.itemId != null ? listingMovements[String(pick.best.itemId)] || null : null);
         } else r.error = data.cleared ? 'listings' : 'cloudflare';
       } catch (e) { r.error = String((e && e.message) || e); }
       verifyCache.set(w.releaseId, r);
