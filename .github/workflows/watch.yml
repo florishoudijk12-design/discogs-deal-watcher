@@ -33,7 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 95   # budgeted sweeps end themselves around ~75 min; this is the hang backstop
     steps:
+      # A queued schedule event keeps the commit SHA from the moment it was created. The external
+      # 15-minute dispatch can finish while that event waits for this workflow's concurrency lock,
+      # leaving the scheduled job one generated-data commit behind before it even starts. Always
+      # start from the current branch tip; the concurrency lock then keeps it stable during a sweep.
       - uses: actions/checkout@v7
+        with:
+          ref: main
 
       - uses: actions/setup-node@v7
         with:
